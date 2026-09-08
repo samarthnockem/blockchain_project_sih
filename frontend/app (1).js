@@ -1054,6 +1054,10 @@ async function connectWallet() {
       return;
     } catch (err) {
       await logoutWalletSession();
+      if (err instanceof TypeError && /fetch/i.test(err.message || "")) {
+        toast("Backend unavailable. Start the backend before authenticating your wallet.");
+        return;
+      }
       toast(err?.message || "Wallet authentication was cancelled.");
       return;
     }

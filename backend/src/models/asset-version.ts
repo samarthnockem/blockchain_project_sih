@@ -1,4 +1,4 @@
-import { Schema, model, models, type InferSchemaType } from "mongoose";
+import mongoose, { Schema, type InferSchemaType } from "mongoose";
 import { assertNoForbiddenFields } from "./schema-guards.js";
 
 const walletAddressPattern = /^0x[a-fA-F0-9]{40}$/;
@@ -95,4 +95,4 @@ assetVersionSchema.index({ assetId: 1, version: 1 }, { unique: true });
 assertNoForbiddenFields(assetVersionSchema, "AssetVersion");
 
 export type AssetVersion = InferSchemaType<typeof assetVersionSchema>;
-export const AssetVersionModel = models.AssetVersion || model("AssetVersion", assetVersionSchema);
+export const AssetVersionModel = mongoose.models.AssetVersion || mongoose.model("AssetVersion", assetVersionSchema);

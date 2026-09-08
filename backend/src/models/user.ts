@@ -1,4 +1,4 @@
-import { Schema, model, models, type InferSchemaType } from "mongoose";
+import mongoose, { Schema, type InferSchemaType } from "mongoose";
 import { assertNoForbiddenFields } from "./schema-guards.js";
 
 const walletAddressPattern = /^0x[a-fA-F0-9]{40}$/;
@@ -51,4 +51,4 @@ const userSchema = new Schema(
 assertNoForbiddenFields(userSchema, "User");
 
 export type User = InferSchemaType<typeof userSchema>;
-export const UserModel = models.User || model("User", userSchema);
+export const UserModel = mongoose.models.User || mongoose.model("User", userSchema);

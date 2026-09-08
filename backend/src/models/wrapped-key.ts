@@ -1,4 +1,4 @@
-import { Schema, model, models, type InferSchemaType } from "mongoose";
+import mongoose, { Schema, type InferSchemaType } from "mongoose";
 import { assertNoForbiddenFields } from "./schema-guards.js";
 
 const walletAddressPattern = /^0x[a-fA-F0-9]{40}$/;
@@ -74,4 +74,4 @@ wrappedKeySchema.index({ assetId: 1, userWallet: 1, active: 1 });
 assertNoForbiddenFields(wrappedKeySchema, "WrappedKey");
 
 export type WrappedKey = InferSchemaType<typeof wrappedKeySchema>;
-export const WrappedKeyModel = models.WrappedKey || model("WrappedKey", wrappedKeySchema);
+export const WrappedKeyModel = mongoose.models.WrappedKey || mongoose.model("WrappedKey", wrappedKeySchema);
