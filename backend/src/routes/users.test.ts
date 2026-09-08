@@ -32,6 +32,166 @@ function mockFindOne(publicKey: string | null = publicEncryptionKey) {
   } as never);
 }
 
+function mockProfileUpdate(profile?: Partial<{ displayName: string; email: string; kycStatus: string; publicEncryptionKey: string }>) {
+  return vi.spyOn(UserModel, "findOneAndUpdate").mockReturnValue({
+    select: vi.fn().mockReturnValue({
+      lean: vi.fn().mockResolvedValue({
+        walletAddress: sessionWallet,
+        displayName: profile?.displayName ?? "Rohit Sharma",
+        email: profile?.email ?? "rohit@example.com",
+        kycStatus: profile?.kycStatus ?? "PENDING",
+        publicEncryptionKey: profile?.publicEncryptionKey
+      })
+    })
+  } as never);
+}
+
+describe("current user profile routes", () => {
+  it("requires authentication to read current user's profile", async () => {
+    const response = await request(createApp()).get("/api/users/me").expect(401);
+
+    expect(response.body.error).toEqual({
+      code: "AUTH_REQUIRED",
+      message: "Authentication required"
+    });
+  });
+
+  it("returns the profile for the authenticated session wallet", async () => {
+    const updateSpy = mockProfileUpdate({ publicEncryptionKey });
+
+    const response = await request(createApp()).get("/api/users/me").set("Cookie", authenticatedCookie()).expect(200);
+
+    expect(response.body).toEqual({
+      walletAddress: sessionWallet,
+      displayName: "Rohit Sharma",
+      email: "rohit@example.com",
+      kycStatus: "PENDING",
+      publicEncryptionKey
+    });
+    expect(updateSpy).toHaveBeenCalledWith(
+      { walletAddress: sessionWallet },
+      {
+        $setOnInsert: {
+          walletAddress: sessionWallet,
+          kycStatus: "PENDING"
+        }
+      },
+      {
+        upsert: true,
+        new: true,
+        runValidators: true,
+        setDefaultsOnInsert: true
+      }
+    );
+  });
+
+  it("requires authentication to update current user's profile", async () => {
+    const response = await request(createApp())
+      .patch("/api/users/me")
+      .send({ displayName: "New Name" })
+      .expect(401);
+
+    expect(response.body.error).toEqual({
+      code: "AUTH_REQUIRED",
+      message: "Authentication required"
+    });
+  });
+
+  it("updates only displayName and email for the authenticated session wallet", async () => {
+    const updateSpy = mockProfileUpdate({ displayName: "New Name", email: "new@example.com" });
+
+    const response = await request(createApp())
+      .patch("/api/users/me")
+      .set("Cookie", authenticatedCookie())
+      .send({
+        displayName: " New Name ",
+        email: "NEW@EXAMPLE.COM"
+      })
+      .expect(200);
+
+    expect(response.body).toEqual({
+      walletAddress: sessionWallet,
+      displayName: "New Name",
+      email: "new@example.com",
+      kycStatus: "PENDING",
+      publicEncryptionKey: null
+    });
+    expect(updateSpy).toHaveBeenCalledWith(
+      { walletAddress: sessionWallet },
+      {
+        $set: {
+          displayName: "New Name",
+          email: "new@example.com"
+        },
+        $setOnInsert: {
+          walletAddress: sessionWallet,
+          kycStatus: "PENDING"
+        }
+      },
+      {
+        upsert: true,
+        new: true,
+        runValidators: true,
+        setDefaultsOnInsert: true
+      }
+    );
+  });
+
+  it("rejects profile mass assignment and protected field overwrites", async () => {
+    const updateSpy = mockProfileUpdate();
+
+    const forbiddenBodies = [
+      { displayName: "Mallory", walletAddress: suppliedWallet },
+      { displayName: "Mallory", kycStatus: "verified" },
+      { displayName: "Mallory", publicEncryptionKey },
+      { displayName: "Mallory", privateKey: "must-not-be-accepted" },
+      { displayName: "Mallory", rawAESKey: "must-not-be-accepted" }
+    ];
+
+    for (const body of forbiddenBodies) {
+      const response = await request(createApp())
+        .patch("/api/users/me")
+        .set("Cookie", authenticatedCookie())
+        .send(body)
+        .expect(400);
+
+      expect(response.body.error.code).toBe("VALIDATION_ERROR");
+    }
+
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it("validates profile displayName and email", async () => {
+    const updateSpy = mockProfileUpdate();
+
+    await request(createApp())
+      .patch("/api/users/me")
+      .set("Cookie", authenticatedCookie())
+      .send({})
+      .expect(400);
+
+    await request(createApp())
+      .patch("/api/users/me")
+      .set("Cookie", authenticatedCookie())
+      .send({ displayName: "" })
+      .expect(400);
+
+    await request(createApp())
+      .patch("/api/users/me")
+      .set("Cookie", authenticatedCookie())
+      .send({ displayName: "a".repeat(101) })
+      .expect(400);
+
+    await request(createApp())
+      .patch("/api/users/me")
+      .set("Cookie", authenticatedCookie())
+      .send({ email: "not-an-email" })
+      .expect(400);
+
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("public encryption key routes", () => {
   it("requires authentication to update current user's public encryption key", async () => {
     const response = await request(createApp())

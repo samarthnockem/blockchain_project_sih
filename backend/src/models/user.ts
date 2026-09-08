@@ -15,7 +15,6 @@ const userSchema = new Schema(
     },
     publicEncryptionKey: {
       type: String,
-      required: true,
       trim: true,
       minlength: 1
     },
@@ -24,9 +23,23 @@ const userSchema = new Schema(
       trim: true,
       maxlength: 100
     },
+    email: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 254
+    },
     kycStatus: {
       type: String,
-      enum: ["not_started", "pending", "verified", "rejected"]
+      enum: ["PENDING", "VERIFIED", "REJECTED"],
+      default: "PENDING"
+    },
+    verificationMethod: {
+      type: String,
+      enum: ["MOCK"]
+    },
+    verifiedAt: {
+      type: Date
     }
   },
   {

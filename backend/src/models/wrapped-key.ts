@@ -3,6 +3,27 @@ import { assertNoForbiddenFields } from "./schema-guards.js";
 
 const walletAddressPattern = /^0x[a-fA-F0-9]{40}$/;
 
+const wrappingMetadataSchema = new Schema(
+  {
+    algorithm: {
+      type: String,
+      required: true,
+      enum: ["RSA-OAEP"]
+    },
+    keyId: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 1,
+      maxlength: 255
+    }
+  },
+  {
+    _id: false,
+    strict: "throw"
+  }
+);
+
 const wrappedKeySchema = new Schema(
   {
     assetId: {
@@ -31,7 +52,7 @@ const wrappedKeySchema = new Schema(
       min: 1
     },
     wrappingMetadata: {
-      type: Schema.Types.Mixed,
+      type: wrappingMetadataSchema,
       required: true
     },
     active: {

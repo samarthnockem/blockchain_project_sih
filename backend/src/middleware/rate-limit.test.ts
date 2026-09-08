@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../config/logger.js";
 import { createRateLimiter } from "./rate-limit.js";
 
 function createRateLimitTestApp() {
@@ -20,6 +21,10 @@ function createRateLimitTestApp() {
 }
 
 describe("rate limiting", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("allows requests below the configured limit", async () => {
     const app = createRateLimitTestApp();
 
@@ -40,5 +45,22 @@ describe("rate limiting", () => {
         message: "Too many requests. Please try again later."
       }
     });
+  });
+
+  it("does not log sensitive query values when requests are rate limited", async () => {
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const app = createRateLimitTestApp();
+
+    await request(app).get("/limited?privateKey=secret-private-key").expect(200);
+    await request(app).get("/limited?privateKey=secret-private-key").expect(200);
+    await request(app).get("/limited?privateKey=secret-private-key").expect(429);
+
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain("secret-private-key");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        route: "/limited"
+      }),
+      "security event"
+    );
   });
 });

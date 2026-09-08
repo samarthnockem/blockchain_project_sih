@@ -12,6 +12,8 @@ import { healthRouter } from "./routes/health.js";
 import { authRouter } from "./routes/auth.js";
 import { readyRouter } from "./routes/ready.js";
 import { usersRouter } from "./routes/users.js";
+import { assetsRouter } from "./routes/assets.js";
+import { kycRouter } from "./routes/kyc.js";
 
 export function createApp() {
   const app = express();
@@ -31,6 +33,8 @@ export function createApp() {
 
   app.use("/api", generalApiLimiter);
   app.use("/api/auth", authRouter);
+  app.use("/api/assets", assetsRouter);
+  app.use("/api/kyc", kycRouter);
   app.use("/api/health", healthRouter);
   app.use("/api/ready", readyRouter);
   app.use("/api/users", usersRouter);

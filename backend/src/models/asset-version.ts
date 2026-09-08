@@ -5,6 +5,34 @@ const walletAddressPattern = /^0x[a-fA-F0-9]{40}$/;
 const sha256Pattern = /^[a-fA-F0-9]{64}$/;
 const transactionHashPattern = /^0x[a-fA-F0-9]{64}$/;
 
+const encryptionMetadataSchema = new Schema(
+  {
+    algorithm: {
+      type: String,
+      required: true,
+      enum: ["AES-256-GCM"]
+    },
+    iv: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 1,
+      maxlength: 4096
+    },
+    tag: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 1,
+      maxlength: 4096
+    }
+  },
+  {
+    _id: false,
+    strict: "throw"
+  }
+);
+
 const assetVersionSchema = new Schema(
   {
     assetId: {
@@ -23,6 +51,10 @@ const assetVersionSchema = new Schema(
       required: true,
       trim: true,
       minlength: 1
+    },
+    encryptionMetadata: {
+      type: encryptionMetadataSchema,
+      required: true
     },
     sha256: {
       type: String,

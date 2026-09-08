@@ -27,14 +27,24 @@ describe("Secure Vault models", () => {
     }
   });
 
-  it("validates User required fields and wallet format", async () => {
+  it("validates User profile fields and wallet format", async () => {
     const user = new UserModel({
       walletAddress: validWallet.toUpperCase(),
-      publicEncryptionKey: "user-public-key"
+      publicEncryptionKey: "user-public-key",
+      displayName: "Demo User",
+      email: "USER@EXAMPLE.COM"
     });
 
     await expect(user.validate()).resolves.toBeUndefined();
     expect(user.walletAddress).toBe(validWallet);
+    expect(user.email).toBe("user@example.com");
+    expect(user.kycStatus).toBe("PENDING");
+
+    await expect(
+      new UserModel({
+        walletAddress: validWallet
+      }).validate()
+    ).resolves.toBeUndefined();
 
     await expect(
       new UserModel({
@@ -74,11 +84,32 @@ describe("Secure Vault models", () => {
     expect(WrappedKeyModel.schema.path("rawKey")).toBeUndefined();
   });
 
+  it("rejects unapproved wrapping metadata fields", async () => {
+    const wrappedKey = new WrappedKeyModel({
+      assetId: validObjectId,
+      userWallet: validWallet,
+      wrappedAESKey: "encrypted-key-for-user",
+      version: 1,
+      wrappingMetadata: {
+        algorithm: "RSA-OAEP",
+        keyId: "user-key-1",
+        secretKey: "must-not-be-stored"
+      }
+    });
+
+    await expect(wrappedKey.validate()).rejects.toThrow();
+  });
+
   it("validates AssetVersion encrypted storage references", async () => {
     const assetVersion = new AssetVersionModel({
       assetId: validObjectId,
       version: 1,
       encryptedStorageReference: "storage://encrypted/document-v1",
+      encryptionMetadata: {
+        algorithm: "AES-256-GCM",
+        iv: "base64-iv",
+        tag: "base64-tag"
+      },
       sha256: validSha256,
       createdBy: validWallet,
       commitMessage: "Initial encrypted version",
@@ -86,6 +117,24 @@ describe("Secure Vault models", () => {
     });
 
     await expect(assetVersion.validate()).resolves.toBeUndefined();
+  });
+
+  it("rejects unapproved encryption metadata fields", async () => {
+    const assetVersion = new AssetVersionModel({
+      assetId: validObjectId,
+      version: 1,
+      encryptedStorageReference: "storage://encrypted/document-v1",
+      encryptionMetadata: {
+        algorithm: "AES-256-GCM",
+        iv: "base64-iv",
+        tag: "base64-tag",
+        privateEncryptionKey: "must-not-be-stored"
+      },
+      sha256: validSha256,
+      createdBy: validWallet
+    });
+
+    await expect(assetVersion.validate()).rejects.toThrow();
   });
 
   it("defines expected indexes", () => {

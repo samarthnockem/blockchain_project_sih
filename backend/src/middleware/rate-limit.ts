@@ -25,7 +25,7 @@ export function createRateLimiter({ windowMs, max, securityEvent = "rate_limit_e
       logSecurityEvent(securityEvent, {
         requestId: req.id,
         method: req.method,
-        route: req.originalUrl,
+        route: req.path,
         ip: req.ip
       });
 

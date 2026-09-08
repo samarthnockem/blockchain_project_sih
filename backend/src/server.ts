@@ -15,7 +15,7 @@ async function main() {
     logger.info({ signal }, "Shutting down backend");
     server.close(async (error) => {
       if (error) {
-        logger.error({ error }, "Error while closing server");
+        logger.error({ errorName: error.name }, "Error while closing server");
         process.exit(1);
       }
 
@@ -29,6 +29,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  logger.error({ error }, "Backend failed to start");
+  logger.error({ errorName: error instanceof Error ? error.name : "UnknownError" }, "Backend failed to start");
   process.exit(1);
 });

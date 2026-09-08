@@ -40,6 +40,26 @@ describe("backend security baseline", () => {
     });
   });
 
+  it("rejects oversized JSON requests without stack traces", async () => {
+    const response = await request(createApp())
+      .post("/api/auth/verify")
+      .set("content-type", "application/json")
+      .send({
+        message: "x".repeat(1024 * 1024 + 1),
+        nonce: "a".repeat(64),
+        signature: "signature"
+      })
+      .expect(413);
+
+    expect(response.body).toEqual({
+      error: {
+        code: "REQUEST_TOO_LARGE",
+        message: "Request body exceeds the configured size limit"
+      }
+    });
+    expect(JSON.stringify(response.body)).not.toContain("stack");
+  });
+
   it("reports database readiness", async () => {
     vi.spyOn(database, "isDatabaseReady").mockReturnValue(true);
 
