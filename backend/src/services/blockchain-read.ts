@@ -1,27 +1,45 @@
-import { Contract, JsonRpcProvider, getAddress, isAddress, type BigNumberish } from "ethers";
+import { Contract, Interface, JsonRpcProvider, getAddress, id, isAddress, type BigNumberish } from "ethers";
 import { env } from "../config/env.js";
 
 export const permissionValues = ["NONE", "READ", "WRITE"] as const;
 export type Permission = (typeof permissionValues)[number];
 
 const assetRegistryAbi = [
-  "function getAssetOwner(uint256 assetId) view returns (address)",
+  "event AssetRegistered(uint256 indexed assetId, address indexed owner, bytes32 sha256Hash, uint256 version)",
+  "event AccessGranted(uint256 indexed assetId, address indexed owner, address indexed grantee, uint8 permission, uint64 validFrom, uint64 validUntil)",
+  "function ownerOf(uint256 assetId) view returns (address)",
   "function getPermission(uint256 assetId, address wallet) view returns (uint8)",
-  "function getCurrentHash(uint256 assetId) view returns (bytes32)",
-  "function getCurrentVersion(uint256 assetId) view returns (uint256)"
+  "function currentHashOf(uint256 assetId) view returns (bytes32)",
+  "function currentVersionOf(uint256 assetId) view returns (uint256)"
 ] as const;
 
 type BlockchainProvider = {
   getNetwork(): Promise<{
     chainId: bigint;
   }>;
+  getCode?(address: string): Promise<string>;
+  getTransactionReceipt?(transactionHash: string): Promise<BlockchainTransactionReceipt | null>;
 };
 
 type AssetRegistryContract = {
-  getAssetOwner(assetId: bigint): Promise<string>;
+  ownerOf(assetId: bigint): Promise<string>;
   getPermission(assetId: bigint, wallet: string): Promise<bigint | number | string>;
-  getCurrentHash(assetId: bigint): Promise<string>;
-  getCurrentVersion(assetId: bigint): Promise<bigint | number | string>;
+  currentHashOf(assetId: bigint): Promise<string>;
+  currentVersionOf(assetId: bigint): Promise<bigint | number | string>;
+};
+
+type BlockchainLog = {
+  address: string;
+  topics: readonly string[];
+  data: string;
+};
+
+type BlockchainTransactionReceipt = {
+  status?: number | bigint | null;
+  from: string;
+  to?: string | null;
+  blockNumber: number;
+  logs: readonly BlockchainLog[];
 };
 
 export type BlockchainReadServiceOptions = {
@@ -36,6 +54,44 @@ export type BlockchainReadService = {
   getPermission(assetId: BigNumberish, wallet: string): Promise<Permission>;
   getCurrentHash(assetId: BigNumberish): Promise<string>;
   getCurrentVersion(assetId: BigNumberish): Promise<number>;
+  verifyAssetRegistration(input: VerifyAssetRegistrationInput): Promise<VerifiedAssetRegistration>;
+  verifyAccessGrant(input: VerifyAccessGrantInput): Promise<VerifiedAccessGrant>;
+};
+
+export type VerifyAssetRegistrationInput = {
+  transactionHash: string;
+  applicationAssetId: string;
+  expectedOwnerWallet: string;
+  expectedSha256: string;
+};
+
+export type VerifiedAssetRegistration = {
+  blockchainAssetId: string;
+  transactionHash: string;
+  blockNumber: number;
+  ownerWallet: string;
+  sha256: string;
+};
+
+export type VerifyAccessGrantInput = {
+  transactionHash: string;
+  blockchainAssetId: string;
+  expectedOwnerWallet: string;
+  expectedGranteeWallet: string;
+  expectedAccessType: "READ" | "WRITE";
+  expectedValidFrom: number;
+  expectedValidUntil: number;
+};
+
+export type VerifiedAccessGrant = {
+  blockchainAssetId: string;
+  transactionHash: string;
+  blockNumber: number;
+  ownerWallet: string;
+  granteeWallet: string;
+  accessType: "READ" | "WRITE";
+  validFrom: number;
+  validUntil: number;
 };
 
 export class BlockchainVerificationError extends Error {
@@ -60,6 +116,14 @@ function normalizeAssetId(assetId: BigNumberish) {
   }
 }
 
+export function deriveBlockchainAssetId(applicationAssetId: string) {
+  if (typeof applicationAssetId !== "string" || !applicationAssetId.trim()) {
+    throw new BlockchainVerificationError();
+  }
+
+  return BigInt(id(applicationAssetId.trim()));
+}
+
 function normalizeWallet(wallet: string) {
   if (!isAddress(wallet)) {
     throw new BlockchainVerificationError();
@@ -68,12 +132,28 @@ function normalizeWallet(wallet: string) {
   return getAddress(wallet);
 }
 
+function normalizeTransactionHash(transactionHash: string) {
+  if (!/^0x[a-fA-F0-9]{64}$/.test(transactionHash)) {
+    throw new BlockchainVerificationError();
+  }
+
+  return transactionHash.toLowerCase();
+}
+
 function normalizeHash(hash: string) {
   if (!/^0x[a-fA-F0-9]{64}$/.test(hash)) {
     throw new BlockchainVerificationError();
   }
 
   return hash.toLowerCase();
+}
+
+function normalizeExpectedSha256(sha256: string) {
+  if (!/^[a-fA-F0-9]{64}$/.test(sha256)) {
+    throw new BlockchainVerificationError();
+  }
+
+  return `0x${sha256.toLowerCase()}`;
 }
 
 function normalizePermission(permission: bigint | number | string): Permission {
@@ -100,6 +180,10 @@ function normalizePermission(permission: bigint | number | string): Permission {
   throw new BlockchainVerificationError();
 }
 
+function permissionToContractValue(accessType: "READ" | "WRITE") {
+  return accessType === "READ" ? 1 : 2;
+}
+
 function normalizeVersion(version: bigint | number | string) {
   try {
     const normalized = BigInt(version);
@@ -116,7 +200,18 @@ function normalizeVersion(version: bigint | number | string) {
 async function assertExpectedChain(provider: BlockchainProvider, expectedChainId: number) {
   const network = await provider.getNetwork();
   if (network.chainId !== BigInt(expectedChainId)) {
-    throw new BlockchainVerificationError();
+    throw new BlockchainVerificationError(`Blockchain provider is on chain ID ${network.chainId.toString()}, expected ${expectedChainId}`);
+  }
+}
+
+async function assertContractDeployed(provider: BlockchainProvider, contractAddress: string) {
+  if (!provider.getCode) {
+    return;
+  }
+
+  const code = await provider.getCode(normalizeWallet(contractAddress));
+  if (!code || code === "0x") {
+    throw new BlockchainVerificationError(`Configured KryptoVault contract is not deployed at ${contractAddress}`);
   }
 }
 
@@ -155,7 +250,8 @@ export function createBlockchainReadService(options: BlockchainReadServiceOption
     async getAssetOwner(assetId: BigNumberish) {
       return verifiedCall(async () => {
         await assertExpectedChain(provider, chainId);
-        const owner = await contract.getAssetOwner(normalizeAssetId(assetId));
+        await assertContractDeployed(provider, contractAddress);
+        const owner = await contract.ownerOf(normalizeAssetId(assetId));
         return normalizeWallet(owner).toLowerCase();
       });
     },
@@ -163,6 +259,7 @@ export function createBlockchainReadService(options: BlockchainReadServiceOption
     async getPermission(assetId: BigNumberish, wallet: string) {
       return verifiedCall(async () => {
         await assertExpectedChain(provider, chainId);
+        await assertContractDeployed(provider, contractAddress);
         const permission = await contract.getPermission(normalizeAssetId(assetId), normalizeWallet(wallet));
         return normalizePermission(permission);
       });
@@ -171,7 +268,8 @@ export function createBlockchainReadService(options: BlockchainReadServiceOption
     async getCurrentHash(assetId: BigNumberish) {
       return verifiedCall(async () => {
         await assertExpectedChain(provider, chainId);
-        const hash = await contract.getCurrentHash(normalizeAssetId(assetId));
+        await assertContractDeployed(provider, contractAddress);
+        const hash = await contract.currentHashOf(normalizeAssetId(assetId));
         return normalizeHash(hash);
       });
     },
@@ -179,8 +277,164 @@ export function createBlockchainReadService(options: BlockchainReadServiceOption
     async getCurrentVersion(assetId: BigNumberish) {
       return verifiedCall(async () => {
         await assertExpectedChain(provider, chainId);
-        const version = await contract.getCurrentVersion(normalizeAssetId(assetId));
+        await assertContractDeployed(provider, contractAddress);
+        const version = await contract.currentVersionOf(normalizeAssetId(assetId));
         return normalizeVersion(version);
+      });
+    },
+
+    async verifyAssetRegistration(input: VerifyAssetRegistrationInput) {
+      return verifiedCall(async () => {
+        await assertExpectedChain(provider, chainId);
+        await assertContractDeployed(provider, contractAddress);
+        if (!provider.getTransactionReceipt) {
+          throw new BlockchainVerificationError();
+        }
+
+        const expectedAssetId = deriveBlockchainAssetId(input.applicationAssetId);
+        const expectedOwner = normalizeWallet(input.expectedOwnerWallet).toLowerCase();
+        const expectedHash = normalizeExpectedSha256(input.expectedSha256);
+        const transactionHash = normalizeTransactionHash(input.transactionHash);
+        const receipt = await provider.getTransactionReceipt(transactionHash);
+
+        if (!receipt || Number(receipt.status) !== 1) {
+          throw new BlockchainVerificationError("Asset registration transaction failed or was not found");
+        }
+
+        if (normalizeWallet(receipt.from).toLowerCase() !== expectedOwner) {
+          throw new BlockchainVerificationError("Asset registration transaction was not sent by the asset owner");
+        }
+
+        if (!receipt.to || normalizeWallet(receipt.to).toLowerCase() !== normalizeWallet(contractAddress).toLowerCase()) {
+          throw new BlockchainVerificationError("Asset registration transaction did not target the configured contract");
+        }
+
+        const contractInterface = new Interface(assetRegistryAbi);
+        const registeredEvent = receipt.logs
+          .filter((log) => normalizeWallet(log.address).toLowerCase() === normalizeWallet(contractAddress).toLowerCase())
+          .map((log) => {
+            try {
+              return contractInterface.parseLog({
+                topics: [...log.topics],
+                data: log.data
+              });
+            } catch {
+              return null;
+            }
+          })
+          .find((event) => event?.name === "AssetRegistered");
+
+        if (!registeredEvent) {
+          throw new BlockchainVerificationError("Asset registration event was not found");
+        }
+
+        const eventAssetId = normalizeAssetId(registeredEvent.args.assetId);
+        const eventOwner = normalizeWallet(registeredEvent.args.owner).toLowerCase();
+        const eventHash = normalizeHash(registeredEvent.args.sha256Hash);
+        const eventVersion = normalizeVersion(registeredEvent.args.version);
+
+        if (eventAssetId !== expectedAssetId) {
+          throw new BlockchainVerificationError("Asset registration event used the wrong asset reference");
+        }
+        if (eventOwner !== expectedOwner) {
+          throw new BlockchainVerificationError("Asset registration event used the wrong owner");
+        }
+        if (eventHash !== expectedHash) {
+          throw new BlockchainVerificationError("Asset registration event used the wrong SHA-256 hash");
+        }
+        if (eventVersion !== 1) {
+          throw new BlockchainVerificationError("Asset registration event used the wrong initial version");
+        }
+
+        return {
+          blockchainAssetId: expectedAssetId.toString(),
+          transactionHash,
+          blockNumber: receipt.blockNumber,
+          ownerWallet: eventOwner,
+          sha256: expectedHash.slice(2)
+        };
+      });
+    },
+
+    async verifyAccessGrant(input: VerifyAccessGrantInput) {
+      return verifiedCall(async () => {
+        await assertExpectedChain(provider, chainId);
+        await assertContractDeployed(provider, contractAddress);
+        if (!provider.getTransactionReceipt) {
+          throw new BlockchainVerificationError();
+        }
+
+        const expectedAssetId = normalizeAssetId(input.blockchainAssetId);
+        const expectedOwner = normalizeWallet(input.expectedOwnerWallet).toLowerCase();
+        const expectedGrantee = normalizeWallet(input.expectedGranteeWallet).toLowerCase();
+        const expectedPermission = permissionToContractValue(input.expectedAccessType);
+        const transactionHash = normalizeTransactionHash(input.transactionHash);
+        const receipt = await provider.getTransactionReceipt(transactionHash);
+
+        if (!receipt || Number(receipt.status) !== 1) {
+          throw new BlockchainVerificationError("Access grant transaction failed or was not found");
+        }
+
+        if (normalizeWallet(receipt.from).toLowerCase() !== expectedOwner) {
+          throw new BlockchainVerificationError("Access grant transaction was not sent by the asset owner");
+        }
+
+        if (!receipt.to || normalizeWallet(receipt.to).toLowerCase() !== normalizeWallet(contractAddress).toLowerCase()) {
+          throw new BlockchainVerificationError("Access grant transaction did not target the configured contract");
+        }
+
+        const contractInterface = new Interface(assetRegistryAbi);
+        const grantedEvent = receipt.logs
+          .filter((log) => normalizeWallet(log.address).toLowerCase() === normalizeWallet(contractAddress).toLowerCase())
+          .map((log) => {
+            try {
+              return contractInterface.parseLog({
+                topics: [...log.topics],
+                data: log.data
+              });
+            } catch {
+              return null;
+            }
+          })
+          .find((event) => event?.name === "AccessGranted");
+
+        if (!grantedEvent) {
+          throw new BlockchainVerificationError("AccessGranted event was not found");
+        }
+
+        const eventAssetId = normalizeAssetId(grantedEvent.args.assetId);
+        const eventOwner = normalizeWallet(grantedEvent.args.owner).toLowerCase();
+        const eventGrantee = normalizeWallet(grantedEvent.args.grantee).toLowerCase();
+        const eventPermission = Number(grantedEvent.args.permission);
+        const eventValidFrom = Number(grantedEvent.args.validFrom);
+        const eventValidUntil = Number(grantedEvent.args.validUntil);
+
+        if (eventAssetId !== expectedAssetId) {
+          throw new BlockchainVerificationError("AccessGranted event used the wrong asset reference");
+        }
+        if (eventOwner !== expectedOwner) {
+          throw new BlockchainVerificationError("AccessGranted event used the wrong owner");
+        }
+        if (eventGrantee !== expectedGrantee) {
+          throw new BlockchainVerificationError("AccessGranted event used the wrong grantee");
+        }
+        if (eventPermission !== expectedPermission) {
+          throw new BlockchainVerificationError("AccessGranted event used the wrong permission");
+        }
+        if (eventValidFrom !== input.expectedValidFrom || eventValidUntil !== input.expectedValidUntil) {
+          throw new BlockchainVerificationError("AccessGranted event used the wrong validity window");
+        }
+
+        return {
+          blockchainAssetId: expectedAssetId.toString(),
+          transactionHash,
+          blockNumber: receipt.blockNumber,
+          ownerWallet: eventOwner,
+          granteeWallet: eventGrantee,
+          accessType: input.expectedAccessType,
+          validFrom: eventValidFrom,
+          validUntil: eventValidUntil
+        };
       });
     }
   };

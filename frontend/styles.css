@@ -867,6 +867,22 @@ label { display: grid; gap: 7px; color: #B8C2D1; font-size: 11px; font-weight: 7
 }
 .toast::before { content: "●"; margin-right: 8px; color: var(--primary-glow); font-size: 8px; }
 .toast.show { opacity: 1; transform: none; }
+.toast.action-toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: auto;
+}
+.toast-action {
+  border: 1px solid rgba(96,165,250,.45);
+  border-radius: 6px;
+  background: rgba(37,99,235,.22);
+  color: #E9F1FB;
+  padding: 6px 8px;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
 
 .hidden { display: none !important; }
 .empty-state {

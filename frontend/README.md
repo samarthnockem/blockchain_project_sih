@@ -6,20 +6,42 @@ This folder contains the final KryptoVault frontend for the hackathon demo.
 Do not replace this UI with React and do not redesign it. The frontend is
 vanilla HTML, CSS, and JavaScript:
 
-1. index (1).html - screens, buttons, forms, and modals
-2. styles (1).css - visual design, dark/light theme, responsive layout
+1. index.html - screens, buttons, forms, and modals
+2. styles.css - visual design, dark/light theme, responsive layout
 3. api.js - small backend API client
 4. crypto.js - client-side document encryption identity helpers
-5. app (1).js - current UI behavior and demo/localStorage state
-6. README (1).txt - this guide
+5. blockchain-config.js - safe local blockchain config pointer
+6. blockchain.js - MetaMask + ethers.js contract transaction helpers
+7. app.js - current UI behavior and backend integration
+8. README.md - this guide
+9. server.js - local static development server
+10. package.json - frontend npm scripts
 
 HOW TO RUN THE FRONTEND DEMO
 ----------------------------
-The current frontend can run by opening index (1).html in a browser or through
-a simple local static server such as VS Code Live Server.
+Start the local frontend server from this folder:
 
-This standalone mode is a frontend demo. It uses browser localStorage instead
-of the real backend until integration work replaces the mock behavior.
+npm run dev
+
+Then open:
+
+http://localhost:8000
+
+The frontend API client defaults to:
+
+http://localhost:4000
+
+The frontend dev server also exposes the generated local contract deployment
+JSON from:
+
+../blockchain/exports/KryptoVaultAccess.local.json
+
+through this browser URL:
+
+http://localhost:8000/blockchain/exports/KryptoVaultAccess.local.json
+
+Run `npm run deploy:local` in `blockchain/` after starting the Hardhat node so
+the frontend can load the current contract ABI, address, and chain ID.
 
 FINAL AGREED ARCHITECTURE
 -------------------------
@@ -106,7 +128,7 @@ Folders are organizational only. Folder access control is not blockchain-based.
 HOW UPLOAD SHOULD WORK AFTER INTEGRATION
 ----------------------------------------
 Current function:
-startSecureUpload()
+startEncryptedUpload()
 
 Final flow:
 1. Read the selected file in the browser.
@@ -114,11 +136,21 @@ Final flow:
 3. Generate a random AES-256-GCM document key in the browser.
 4. Encrypt the file in the browser.
 5. Wrap the AES key for the owner in the browser.
-6. Use MetaMask for any required blockchain registration/write action.
-7. Send only encrypted bytes, filename metadata, SHA-256, wrapped owner key,
+6. Send only encrypted bytes, filename metadata, SHA-256, wrapped owner key,
    encryption metadata, and optional passwordProtectionEnabled metadata to:
 
 POST /api/assets
+
+7. Receive the application asset ID with status PENDING_BLOCKCHAIN.
+8. Use MetaMask to call registerAsset with the deterministic on-chain
+   reference to that asset ID and the SHA-256 hash.
+9. Wait for transaction confirmation.
+10. Send the transaction hash to:
+
+POST /api/assets/:assetId/blockchain-sync
+
+11. The backend verifies the transaction and AssetRegistered event before
+    marking the asset ACTIVE and verified.
 
 The backend must never receive plaintext file bytes, raw AES keys, private
 encryption keys, wallet private keys, seed phrases, or plaintext passwords.
@@ -142,6 +174,25 @@ Hackathon implementation:
 - Retrieve other users' public keys through GET /api/users/:wallet/public-key.
 - Wrap small AES-256 document keys with RSA-OAEP.
 
+OPTIONAL FILE PASSWORD
+----------------------
+When the optional file password field is empty, the document AES key is wrapped
+for the owner with the owner's document encryption public key.
+
+When a password is provided, the browser derives a key-encryption key with
+PBKDF2-SHA-256 using a random salt and a high iteration count, then encrypts the
+document AES key with AES-256-GCM. The backend receives only
+passwordProtectionEnabled, the salt, KDF algorithm and iteration count, wrapping
+IV, password-wrapped AES key, ciphertext, and safe metadata.
+
+The password and derived key never leave the browser. No second owner public-key
+wrapping is stored for password-protected assets, so the owner must provide the
+password later to recover the document AES key for opening or sharing.
+
+Hackathon limitation: there is no password recovery, password change, strength
+meter, or audited backup design yet. Losing the password means losing access to
+that asset's AES key unless a future recovery design is added.
+
 Prototype limitation:
 If the browser profile is cleared, IndexedDB is deleted, or the device is lost,
 the private document encryption key may be unrecoverable. Production recovery
@@ -162,7 +213,8 @@ Real-mode flow:
 7. Render the wallet returned by the verified backend session.
 
 The selected wallet address alone is not authentication. The fake wallet
-fallback exists only when explicit demo mode is enabled.
+fallback exists only when explicit demo mode is enabled. In real mode,
+MetaMask and the backend challenge/signature flow are required.
 
 HOW OPEN SHOULD WORK AFTER INTEGRATION
 --------------------------------------
@@ -223,7 +275,15 @@ Use the existing backend APIs and models where possible:
 - GET /api/auth/me
 - PUT /api/users/me/encryption-key
 - GET /api/users/:wallet/public-key
+- GET /api/folders
+- POST /api/folders
+- GET /api/assets
+- GET /api/assets/my
+- GET /api/assets/my?search=:search
+- GET /api/assets/my?folderId=:folderId
+- GET /api/assets?folderId=:folderId
 - POST /api/assets
+- PATCH /api/assets/:assetId/folder
 - GET /api/assets/:assetId/open
 
 MongoDB stores users, asset metadata, asset versions, and wrapped keys.

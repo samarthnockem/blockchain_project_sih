@@ -15,6 +15,8 @@ function mockBlockchain(overrides: Partial<BlockchainReadService> = {}): Blockch
     getPermission: vi.fn().mockResolvedValue("NONE" satisfies Permission),
     getCurrentHash: vi.fn().mockResolvedValue(`0x${"a".repeat(64)}`),
     getCurrentVersion: vi.fn().mockResolvedValue(1),
+    verifyAssetRegistration: vi.fn(),
+    verifyAccessGrant: vi.fn(),
     ...overrides
   };
 }

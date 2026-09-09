@@ -17,6 +17,34 @@ modals.
 - Blockchain: authoritative ownership, hashes, READ/WRITE/NONE permissions,
   and audit events.
 
+## Local Development
+
+Start the backend first:
+
+```bash
+cd backend
+npm install
+npm run dev
+```
+
+Start the frontend in a second terminal:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Open `http://localhost:8000`.
+
+Expected backend checks:
+
+- `http://localhost:4000/api/health`
+- `http://localhost:4000/api/ready`
+
+For local integration, keep `backend/.env` set to `PORT=4000`,
+`CORS_ORIGIN=http://localhost:8000`, and the existing MongoDB Atlas
+`MONGODB_URI`.
+
 ## Security Rules
 
 - Plaintext files never reach the backend.
@@ -33,5 +61,6 @@ modals.
 ## Docs
 
 - Backend details: `backend/README.md`
-- Frontend guide: `frontend/README (1).txt`
+- Frontend guide: `frontend/README.md`
+- Local blockchain demo: `blockchain/README.md`
 - Integration plan: `docs/FINAL_INTEGRATION_PLAN.md`

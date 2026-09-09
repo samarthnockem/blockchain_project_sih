@@ -107,6 +107,8 @@ let state = loadState();
 let currentDocId = null;
 let pendingRevoke = null;
 let selectedUploadFile = null;
+let blockchainRecordsRequestId = 0;
+let toastTimer = null;
 
 function isDemoModeEnabled() {
   return window.KRYPTO_DEMO_MODE === true || localStorage.getItem(DEMO_MODE_STORAGE_KEY) === "true";
@@ -250,18 +252,42 @@ async function mockVerifyKyc() {
 }
 
 async function loadOwnedAssets() {
-  // Backend listing is not implemented yet. Keep this as the integration boundary.
-  return [];
+  if (!window.KryptoVaultApi) return [];
+
+  try {
+    const response = await window.KryptoVaultApi.get("/api/assets/my");
+    return (response?.assets || []).map(normalizeBackendAsset);
+  } catch (error) {
+    if (error?.status === 401) return [];
+    toast(error?.message || "Documents could not be loaded.");
+    return [];
+  }
 }
 
 async function loadSharedAssets() {
-  // Backend shared-asset listing is not implemented yet.
-  return [];
+  if (!window.KryptoVaultApi) return [];
+
+  try {
+    const response = await window.KryptoVaultApi.get("/api/assets/shared-with-me");
+    return (response?.assets || []).map(normalizeBackendSharedAsset);
+  } catch (error) {
+    if (error?.status === 401) return [];
+    toast(error?.message || "Shared documents could not be loaded.");
+    return [];
+  }
 }
 
 async function loadFolders() {
-  // Folder persistence is not implemented yet; folders are organizational only.
-  return [];
+  if (!window.KryptoVaultApi) return [];
+
+  try {
+    const response = await window.KryptoVaultApi.get("/api/folders");
+    return (response?.folders || []).map(normalizeBackendFolder);
+  } catch (error) {
+    if (error?.status === 401) return [];
+    toast(error?.message || "Folders could not be loaded.");
+    return [];
+  }
 }
 
 async function loadAuditActivity() {
@@ -282,8 +308,7 @@ async function loadBackendState() {
     loadFolders(),
     loadOwnedAssets(),
     loadSharedAssets(),
-    loadAuditActivity(),
-    loadBlockchainRecords()
+    loadAuditActivity()
   ]);
 
   state = {
@@ -295,6 +320,146 @@ async function loadBackendState() {
     activities
   };
   renderAll();
+}
+
+async function refreshWorkspaceState() {
+  if (isDemoModeEnabled()) {
+    renderAll();
+    return;
+  }
+
+  const [folders, documents, shared] = await Promise.all([
+    loadFolders(),
+    loadOwnedAssets(),
+    loadSharedAssets()
+  ]);
+
+  state = {
+    ...state,
+    folders,
+    documents,
+    shared
+  };
+  renderAll();
+}
+
+function normalizeBackendFolder(folder) {
+  return {
+    id: folder.id,
+    name: folder.name || "Untitled Folder",
+    parentFolderId: folder.parentFolderId || null,
+    createdAt: folder.createdAt ? new Date(folder.createdAt).getTime() : Date.now(),
+    updatedAt: folder.updatedAt ? new Date(folder.updatedAt).getTime() : undefined
+  };
+}
+
+function normalizeBackendAsset(asset) {
+  const verificationStatus = String(asset.blockchainVerificationStatus || "pending").toLowerCase();
+
+  return {
+    id: asset.assetId || asset.id,
+    name: asset.filename || "Untitled Document",
+    size: typeof asset.size === "number" ? asset.size : 0,
+    mimeType: asset.mimeType || "application/octet-stream",
+    folderId: asset.folderId || null,
+    accessType: "private",
+    hash: asset.sha256 || "",
+    verified: verificationStatus === "verified",
+    status: asset.status || "active",
+    passwordProtectionEnabled: asset.passwordProtectionEnabled === true,
+    blockchainVerificationStatus: verificationStatus,
+    blockchainAssetId: asset.blockchainAssetId || "",
+    txHash: asset.registrationTransactionHash || "",
+    blockNumber: asset.registrationBlockNumber || "",
+    createdAt: asset.createdAt ? new Date(asset.createdAt).getTime() : Date.now(),
+    permissions: [],
+    accessGrants: [],
+    accessGrantsLoadedFor: null,
+    accessGrantsLoading: false
+  };
+}
+
+function normalizeBackendAccessGrant(grant) {
+  const recipientWallet = grant.granteeWallet || "";
+  const displayName = grant.granteeDisplayName || shortHash(recipientWallet);
+  return {
+    id: grant.blockchainTxHash || recipientWallet,
+    name: displayName,
+    recipient: recipientWallet,
+    wallet: recipientWallet,
+    role: grant.accessType,
+    expiresAt: grant.validUntil ? new Date(grant.validUntil).getTime() : null,
+    validFrom: grant.validFrom ? new Date(grant.validFrom).getTime() : null,
+    reason: grant.reason || "",
+    status: String(grant.status || "ACTIVE").toUpperCase(),
+    blockchainTxHash: grant.blockchainTxHash || ""
+  };
+}
+
+function normalizeBackendSharedAsset(asset) {
+  const blockchainVerified = asset.blockchainVerified === true;
+  return {
+    id: asset.assetId || asset.id,
+    assetId: asset.assetId || asset.id,
+    name: asset.filename || "Untitled Document",
+    owner: asset.ownerDisplayName || shortHash(asset.ownerWallet),
+    ownerWallet: asset.ownerWallet || "",
+    access: asset.permission || "READ",
+    expiresAt: asset.expiry ? new Date(asset.expiry).getTime() : null,
+    currentVersion: asset.currentVersion || "",
+    hash: asset.sha256 || "",
+    blockchainVerified,
+    status: blockchainVerified ? "VERIFIED" : "PENDING",
+    size: typeof asset.size === "number" ? asset.size : 0,
+    mimeType: asset.mimeType || "application/octet-stream",
+    blockchainAssetId: asset.blockchainAssetId || ""
+  };
+}
+
+function normalizeBlockchainRecord(record) {
+  return {
+    assetId: record.assetId || record.id || "",
+    filename: record.filename || "Untitled Document",
+    ownerWallet: record.ownerWallet || "",
+    currentHash: record.currentHash || "",
+    currentVersion: record.currentVersion || "",
+    registrationTxHash: record.registrationTxHash || record.registrationTransactionHash || "",
+    blockNumber: record.blockNumber || "",
+    status: record.status || record.blockchainVerificationStatus || "pending"
+  };
+}
+
+function blockchainStatusBadge(status) {
+  const normalized = String(status || "pending").toUpperCase();
+  if (normalized === "VERIFIED" || normalized === "ACTIVE" || normalized === "CONFIRMED") {
+    return `<span class="badge green">Verified</span>`;
+  }
+  if (normalized.includes("FAILED") || normalized.includes("MISMATCH") || normalized === "FAILED") {
+    return `<span class="badge red">${escapeHtml(normalized.replaceAll("_", " "))}</span>`;
+  }
+  return `<span class="badge blue">${escapeHtml(normalized.replaceAll("_", " "))}</span>`;
+}
+
+function renderBlockchainTable(records) {
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Document</th><th>Owner</th><th>Hash</th><th>Transaction</th><th>Block</th><th>Status</th></tr></thead>
+        <tbody>
+          ${records.map(record => `
+            <tr>
+              <td class="file-name">${escapeHtml(record.filename)}</td>
+              <td>${record.ownerWallet ? shortHash(record.ownerWallet) : "Pending"}</td>
+              <td class="hash-text">${record.currentHash ? shortHash(record.currentHash) : "Pending"}</td>
+              <td class="hash-text">${record.registrationTxHash ? shortHash(record.registrationTxHash) : "Pending"}</td>
+              <td>${record.blockNumber || "Pending"}</td>
+              <td>${blockchainStatusBadge(record.status)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 function clearAuthenticatedUser() {
@@ -467,9 +632,53 @@ window.KryptoVaultAuth = {
 
 function toast(message) {
   const el = document.getElementById("toast");
+  if (toastTimer) clearTimeout(toastTimer);
+  el.classList.remove("action-toast");
   el.textContent = message;
   el.classList.add("show");
-  setTimeout(() => el.classList.remove("show"), 2200);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
+}
+
+function toastAction(message, actionLabel, action) {
+  const el = document.getElementById("toast");
+  if (toastTimer) clearTimeout(toastTimer);
+  el.textContent = "";
+  const text = document.createElement("span");
+  text.textContent = message;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "toast-action";
+  button.textContent = actionLabel;
+  button.addEventListener("click", action);
+  el.append(text, button);
+  el.classList.add("action-toast");
+  el.classList.add("show");
+}
+
+function isWrongNetworkError(error) {
+  return error?.code === "WRONG_NETWORK";
+}
+
+function showNetworkSwitchAction(error) {
+  const chainName = error?.details?.expectedChainName || "Hardhat Local";
+  toastAction(error?.message || `Wrong network. Switch MetaMask to ${chainName}.`, `Switch to ${chainName}`, async () => {
+    try {
+      await window.KryptoVaultBlockchain.switchToExpectedChain();
+      toast(`MetaMask switched to ${chainName}.`);
+      renderAll();
+    } catch (switchError) {
+      toast(switchError?.message || `Could not switch to ${chainName}.`);
+    }
+  });
+}
+
+function toastError(error, fallbackMessage) {
+  if (isWrongNetworkError(error) && window.KryptoVaultBlockchain?.switchToExpectedChain) {
+    showNetworkSwitchAction(error);
+    return;
+  }
+
+  toast(error?.message || fallbackMessage);
 }
 
 function openModal(id) { document.getElementById(id).classList.add("open"); }
@@ -506,6 +715,10 @@ function addActivity(action, detail) {
 }
 function folderName(id) {
   return state.folders.find(f => f.id === id)?.name || "Unfiled";
+}
+
+function activeDocumentTabName() {
+  return document.querySelector("[data-doc-tab].active")?.dataset.docTab || "overview";
 }
 
 function switchPage(name) {
@@ -564,9 +777,9 @@ function renderHeader() {
 function renderDashboard() {
   document.getElementById("statDocs").textContent = state.documents.length;
   document.getElementById("statShared").textContent = state.shared.length;
-  const verified = state.documents.filter(d => d.verified).length;
+  const verified = state.documents.filter(d => d.blockchainVerificationStatus === "verified" || d.verified).length;
   document.getElementById("statVerified").textContent = `${verified}/${state.documents.length}`;
-  document.getElementById("statStorage").textContent = fmtSize(state.documents.reduce((a, d) => a + d.size, 0));
+  document.getElementById("statStorage").textContent = fmtSize(state.documents.reduce((a, d) => a + Number(d.size || 0), 0));
   document.getElementById("recentDocs").innerHTML = documentsTable(state.documents.slice(0, 5), true);
 }
 
@@ -586,7 +799,7 @@ function documentsTable(docs, compact = false) {
               <td><span class="file-name">${escapeHtml(d.name)}</span><br><span class="muted">${fmtSize(d.size)}</span></td>
               <td><span class="badge ${d.verified ? "green" : "red"}">${d.verified ? "Verified ✓" : "Unverified"}</span></td>
               <td>${escapeHtml(folderName(d.folderId))}</td>
-              <td>${d.permissions.filter(p => p.active).length ? `${d.permissions.filter(p=>p.active).length} user(s)` : "Private"}</td>
+              <td>${documentAccessLabel(d)}</td>
               <td>${fmtDate(d.createdAt)}</td>
               <td class="actions-cell">
                 <button class="btn secondary small" onclick="openDocument('${d.id}')">Open</button>
@@ -601,6 +814,20 @@ function documentsTable(docs, compact = false) {
   `;
 }
 
+function documentAccessLabel(doc) {
+  if (isDemoModeEnabled()) {
+    const active = doc.permissions.filter(p => p.active).length;
+    return active ? `${active} user(s)` : "Private";
+  }
+
+  if (doc.accessGrantsLoadedFor === doc.id) {
+    const active = doc.accessGrants.filter(p => p.status === "ACTIVE").length;
+    return active ? `${active} user(s)` : "Private";
+  }
+
+  return "Manage";
+}
+
 function renderDocuments() {
   const q = (document.getElementById("docSearch")?.value || "").toLowerCase();
   const docs = state.documents.filter(d => d.name.toLowerCase().includes(q));
@@ -610,7 +837,7 @@ function renderDocuments() {
 function renderShared() {
   const el = document.getElementById("sharedList");
   if (!state.shared.length) {
-    el.innerHTML = `<div class="empty-state">Nothing has been shared with this demo user yet.</div>`;
+    el.innerHTML = `<div class="empty-state">Nothing has been shared with this wallet yet.</div>`;
     return;
   }
   el.innerHTML = `
@@ -622,10 +849,10 @@ function renderShared() {
             <tr>
               <td class="file-name">${escapeHtml(s.name)}</td>
               <td>${escapeHtml(s.owner)}</td>
-              <td><span class="badge blue">${s.access}</span></td>
+              <td><span class="badge blue">${escapeHtml(s.access)}</span></td>
               <td>${fmtDate(s.expiresAt)}</td>
-              <td><span class="badge green">Verified ✓</span></td>
-              <td><button class="btn secondary small" onclick="simulateSharedOpen('${s.id}')">Open</button></td>
+              <td>${blockchainStatusBadge(s.status)}</td>
+              <td><button class="btn secondary small" onclick="openSharedDocument('${s.id}')">Open</button></td>
             </tr>
           `).join("")}
         </tbody>
@@ -653,14 +880,35 @@ function renderFolders() {
   }).join("");
 }
 
-window.openFolder = function(folderId) {
+window.openFolder = async function(folderId) {
   const folder = state.folders.find(f => f.id === folderId);
   if (!folder) return;
-  const docs = state.documents.filter(d => d.folderId === folderId);
   document.getElementById("folderViewTitle").textContent = folder.name;
-  document.getElementById("folderViewMeta").textContent = `${docs.length} document${docs.length === 1 ? "" : "s"}`;
-  document.getElementById("folderDocuments").innerHTML = documentsTable(docs);
+  document.getElementById("folderViewMeta").textContent = "Loading documents...";
+  document.getElementById("folderDocuments").innerHTML = `<div class="empty-state">Loading documents...</div>`;
   openModal("folderViewModal");
+
+  if (isDemoModeEnabled()) {
+    const docs = state.documents.filter(d => d.folderId === folderId);
+    document.getElementById("folderViewMeta").textContent = `${docs.length} document${docs.length === 1 ? "" : "s"}`;
+    document.getElementById("folderDocuments").innerHTML = documentsTable(docs);
+    return;
+  }
+
+  try {
+    const response = await window.KryptoVaultApi.get("/api/assets/my", { query: { folderId } });
+    const docs = (response?.assets || []).map(normalizeBackendAsset);
+    state.documents = [
+      ...state.documents.filter(d => d.folderId !== folderId),
+      ...docs
+    ];
+    renderFolders();
+    document.getElementById("folderViewMeta").textContent = `${docs.length} document${docs.length === 1 ? "" : "s"}`;
+    document.getElementById("folderDocuments").innerHTML = documentsTable(docs);
+  } catch (error) {
+    document.getElementById("folderViewMeta").textContent = "Unable to load documents";
+    document.getElementById("folderDocuments").innerHTML = `<div class="empty-state">${escapeHtml(error?.message || "Folder documents could not be loaded.")}</div>`;
+  }
 };
 
 function renderActivity() {
@@ -680,29 +928,43 @@ function renderActivity() {
 
 function renderBlockchain() {
   const el = document.getElementById("blockchainList");
-  if (!state.documents.length) {
-    el.innerHTML = `<div class="empty-state">No blockchain records.</div>`;
+  if (isDemoModeEnabled()) {
+    if (!state.documents.length) {
+      el.innerHTML = `<div class="empty-state">No blockchain records.</div>`;
+      return;
+    }
+
+    el.innerHTML = renderBlockchainTable(state.documents.map(d => ({
+      assetId: d.id,
+      filename: d.name,
+      ownerWallet: state.user.walletAddress,
+      currentHash: d.hash,
+      currentVersion: d.currentVersion || 1,
+      registrationTxHash: d.txHash,
+      blockNumber: d.blockNumber,
+      status: d.verified ? "VERIFIED" : "PENDING"
+    })));
     return;
   }
-  el.innerHTML = `
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Document</th><th>Owner</th><th>Hash</th><th>Transaction</th><th>Block</th><th>Status</th></tr></thead>
-        <tbody>
-          ${state.documents.map(d => `
-            <tr>
-              <td class="file-name">${escapeHtml(d.name)}</td>
-              <td>${state.user.walletAddress ? shortHash(state.user.walletAddress) : "Demo Owner"}</td>
-              <td class="hash-text">${shortHash(d.hash)}</td>
-              <td class="hash-text">${shortHash(d.txHash)}</td>
-              <td>${d.blockNumber}</td>
-              <td><span class="badge green">Confirmed</span></td>
-            </tr>
-          `).join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
+
+  if (!state.user.walletAddress) {
+    el.innerHTML = `<div class="empty-state">Connect your wallet to view blockchain records.</div>`;
+    return;
+  }
+
+  const requestId = ++blockchainRecordsRequestId;
+  el.innerHTML = `<div class="empty-state">Loading blockchain records...</div>`;
+
+  window.KryptoVaultApi.get("/api/blockchain/records")
+    .then((response) => {
+      if (requestId !== blockchainRecordsRequestId) return;
+      const records = (response?.records || []).map(normalizeBlockchainRecord);
+      el.innerHTML = records.length ? renderBlockchainTable(records) : `<div class="empty-state">No blockchain records.</div>`;
+    })
+    .catch((error) => {
+      if (requestId !== blockchainRecordsRequestId) return;
+      el.innerHTML = `<div class="empty-state">${escapeHtml(error?.message || "Blockchain records could not be loaded.")}</div>`;
+    });
 }
 
 function renderAccount() {
@@ -776,7 +1038,10 @@ function renderSettings() {
 
 function populateFolderSelect() {
   const sel = document.getElementById("uploadFolder");
-  sel.innerHTML = state.folders.map(f => `<option value="${f.id}">${escapeHtml(f.name)}</option>`).join("");
+  sel.innerHTML = `
+    <option value="">Unfiled</option>
+    ${state.folders.map(f => `<option value="${f.id}">${escapeHtml(f.name)}</option>`).join("")}
+  `;
 }
 
 function resetUploadModal() {
@@ -827,7 +1092,7 @@ async function startSecureUpload() {
     name: file.name,
     size: file.size,
     mimeType: file.type || "application/octet-stream",
-    folderId: document.getElementById("uploadFolder").value,
+    folderId: document.getElementById("uploadFolder").value || null,
     accessType: document.getElementById("uploadAccess").value,
     hash,
     verified: true,
@@ -845,6 +1110,118 @@ async function startSecureUpload() {
   document.getElementById("uploadProgress").classList.add("hidden");
   document.getElementById("uploadSuccess").classList.remove("hidden");
   document.getElementById("successHash").textContent = hash;
+}
+
+async function startEncryptedUpload() {
+  if (isDemoModeEnabled()) {
+    return startSecureUpload();
+  }
+
+  const file = selectedUploadFile;
+  if (!file) return toast("Choose a file first.");
+  if (!state.user.walletAddress) return toast("Connect and authenticate your wallet before uploading.");
+  if (!window.KryptoVaultCrypto) return toast("Document encryption support is not available.");
+  if (!window.KryptoVaultApi) return toast("API client is not available.");
+  if (!window.KryptoVaultBlockchain) return toast("Blockchain support is not available.");
+
+  document.getElementById("uploadStepForm").classList.add("hidden");
+  document.getElementById("uploadProgress").classList.remove("hidden");
+  document.getElementById("uploadSuccess").classList.add("hidden");
+
+  const steps = [
+    "Reading plaintext file locally",
+    "Calculating plaintext SHA-256 fingerprint",
+    "Generating random AES-256-GCM key",
+    "Encrypting file locally with unique IV",
+    "Wrapping AES key with owner public key or password",
+    "Uploading ciphertext and safe metadata",
+    "Registering asset hash with MetaMask",
+    "Confirming blockchain transaction",
+    "Syncing verified blockchain registration"
+  ];
+
+  const progressEl = document.getElementById("progressSteps");
+  progressEl.innerHTML = steps.map((step, index) => `<div class="progress-step" id="real-prog-${index}"><span class="marker">...</span><span>${step}</span></div>`).join("");
+
+  async function completeStep(index, operation) {
+    const row = document.getElementById(`real-prog-${index}`);
+    row.classList.add("active");
+    row.querySelector(".marker").textContent = "...";
+    const result = operation ? await operation() : undefined;
+    await delay(state.settings.showProgress ? 420 : 50);
+    row.classList.remove("active");
+    row.classList.add("done");
+    row.querySelector(".marker").textContent = "OK";
+    return result;
+  }
+
+  try {
+    const password = document.getElementById("uploadPassword").value;
+    const passwordProtectionEnabled = password.length > 0;
+    const ownerIdentity = passwordProtectionEnabled
+      ? null
+      : await window.KryptoVaultCrypto.getDocumentEncryptionIdentity(state.user.walletAddress);
+    const plaintext = await completeStep(0, () => file.arrayBuffer());
+    const sha256 = await completeStep(1, () => window.KryptoVaultCrypto.sha256Hex(plaintext));
+    const aesKey = await completeStep(2, () => window.KryptoVaultCrypto.generateDocumentAesKey());
+    const encrypted = await completeStep(3, () => window.KryptoVaultCrypto.encryptBytesWithAesGcm(plaintext, aesKey));
+    const wrappedKey = await completeStep(4, async () => {
+      if (passwordProtectionEnabled) {
+        return window.KryptoVaultCrypto.wrapDocumentAesKeyWithPassword(aesKey, password);
+      }
+
+      return {
+        wrappedAESKey: await window.KryptoVaultCrypto.wrapDocumentAesKey(aesKey, ownerIdentity.publicEncryptionKey),
+        wrappingMetadata: {
+          algorithm: "RSA-OAEP",
+          keyId: ownerIdentity.keyId
+        }
+      };
+    });
+    const uploadResult = await completeStep(5, async () => {
+      const form = new FormData();
+      const folderId = document.getElementById("uploadFolder").value;
+
+      form.append("filename", file.name);
+      form.append("mimeType", file.type || "application/octet-stream");
+      form.append("originalSize", String(file.size));
+      form.append("sha256", sha256);
+      form.append("wrappedAESKey", wrappedKey.wrappedAESKey);
+      form.append("encryptionMetadata", JSON.stringify(encrypted.encryptionMetadata));
+      form.append("wrappingMetadata", JSON.stringify(wrappedKey.wrappingMetadata));
+      form.append("passwordProtectionEnabled", passwordProtectionEnabled ? "true" : "false");
+      if (folderId) form.append("folderId", folderId);
+      form.append("encryptedFile", new Blob([encrypted.encryptedBytes], { type: "application/octet-stream" }), `${file.name}.enc`);
+
+      return window.KryptoVaultApi.post("/api/assets", form);
+    });
+
+    const assetId = uploadResult?.asset?.id;
+    if (!assetId) {
+      throw new Error("Backend did not return an asset ID for blockchain registration.");
+    }
+
+    const registrationTx = await completeStep(6, () => window.KryptoVaultBlockchain.registerAsset(assetId, sha256));
+    const receipt = await completeStep(7, () => registrationTx.wait(1));
+    if (!receipt || Number(receipt.status) !== 1) {
+      throw new Error("Blockchain registration transaction failed.");
+    }
+    await completeStep(8, () =>
+      window.KryptoVaultApi.post(`/api/assets/${assetId}/blockchain-sync`, {
+        transactionHash: registrationTx.hash
+      })
+    );
+
+    await refreshWorkspaceState();
+    document.getElementById("uploadProgress").classList.add("hidden");
+    document.getElementById("uploadSuccess").classList.remove("hidden");
+    document.getElementById("successHash").textContent = sha256;
+    toast("Encrypted file uploaded and registered on-chain.");
+  } catch (error) {
+    document.getElementById("uploadStepForm").classList.remove("hidden");
+    document.getElementById("uploadProgress").classList.add("hidden");
+    toastError(error, "Encrypted upload failed.");
+  }
 }
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -878,19 +1255,25 @@ function renderDocumentModal() {
     </div>
   `;
 
-  const activePerms = d.permissions.filter(p => p.active);
-  document.getElementById("doc-tab-access").innerHTML = activePerms.length ? `
+  const activePerms = isDemoModeEnabled()
+    ? d.permissions.filter(p => p.active).map(p => ({ ...p, status: "ACTIVE" }))
+    : d.accessGrants || [];
+  const shouldLoadAccessGrants = !isDemoModeEnabled() && activeDocumentTabName() === "access" && d.accessGrantsLoadedFor !== d.id;
+  if (shouldLoadAccessGrants && !d.accessGrantsLoading) {
+    setTimeout(() => loadDocumentAccessGrants(d), 0);
+  }
+  document.getElementById("doc-tab-access").innerHTML = shouldLoadAccessGrants ? `<div class="empty-state">Loading access grants...</div>` : activePerms.length ? `
     <div class="table-wrap">
       <table>
-        <thead><tr><th>User</th><th>Recipient</th><th>Role</th><th>Expires</th><th></th></tr></thead>
+        <thead><tr><th>Recipient</th><th>Permission</th><th>Expiry</th><th>Status</th><th></th></tr></thead>
         <tbody>
           ${activePerms.map(p => `
             <tr>
-              <td class="file-name">${escapeHtml(p.name)}</td>
-              <td>${escapeHtml(p.recipient)}</td>
+              <td class="file-name">${escapeHtml(p.name)}<br><span class="muted">${escapeHtml(p.recipient || p.wallet)}</span></td>
               <td><span class="badge blue">${p.role}</span></td>
               <td>${fmtDate(p.expiresAt)}</td>
-              <td><button class="btn danger small" onclick="openRevoke('${d.id}','${p.id}')">Revoke</button></td>
+              <td><span class="badge ${p.status === "ACTIVE" ? "green" : p.status === "EXPIRED" ? "blue" : "red"}">${escapeHtml(p.status || "ACTIVE")}</span></td>
+              <td><button class="btn danger small" onclick="openRevoke('${d.id}','${p.id}')" ${p.status === "ACTIVE" ? "" : "disabled"}>Revoke</button></td>
             </tr>
           `).join("")}
         </tbody>
@@ -903,14 +1286,102 @@ function renderDocumentModal() {
     ? acts.map(a => `<div class="detail-card" style="margin-bottom:8px"><strong>${escapeHtml(a.action)}</strong><br><span class="muted">${escapeHtml(a.detail)} • ${fmtDate(a.time)}</span></div>`).join("")
     : `<div class="empty-state">No document-specific activity yet.</div>`;
 
-  document.getElementById("doc-tab-blockchain").innerHTML = `
-    <div class="detail-grid">
-      <div class="detail-card"><span>Record Status</span><strong>Confirmed</strong></div>
-      <div class="detail-card"><span>Block Number</span><strong>${d.blockNumber}</strong></div>
-      <div class="detail-card" style="grid-column:1/-1"><span>Transaction Hash</span><code>${d.txHash}</code></div>
-      <div class="detail-card" style="grid-column:1/-1"><span>Document Hash</span><code>${d.hash}</code></div>
-    </div>
-  `;
+  renderDocumentBlockchainTab(d);
+}
+
+async function loadDocumentAccessGrants(doc, force = false) {
+  const target = document.getElementById("doc-tab-access");
+  if (!window.KryptoVaultApi) {
+    target.innerHTML = `<div class="empty-state">Access API is not available.</div>`;
+    return [];
+  }
+  if (!force && doc.accessGrantsLoadedFor === doc.id) {
+    return doc.accessGrants;
+  }
+
+  doc.accessGrantsLoading = true;
+  if (currentDocId === doc.id) {
+    target.innerHTML = `<div class="empty-state">Loading access grants...</div>`;
+  }
+
+  try {
+    const response = await window.KryptoVaultApi.get(`/api/assets/${encodeURIComponent(doc.id)}/access`);
+    const latestDoc = state.documents.find(item => item.id === doc.id) || doc;
+    latestDoc.accessGrants = (response?.access || []).map(normalizeBackendAccessGrant);
+    latestDoc.accessGrantsLoadedFor = doc.id;
+    latestDoc.accessGrantsLoading = false;
+    if (currentDocId === doc.id) {
+      renderDocumentModal();
+    }
+    renderDashboard();
+    renderDocuments();
+    return latestDoc.accessGrants;
+  } catch (error) {
+    doc.accessGrantsLoading = false;
+    if (currentDocId === doc.id) {
+      target.innerHTML = `<div class="empty-state">${escapeHtml(error?.message || "Access grants could not be loaded.")}</div>`;
+    }
+    return [];
+  }
+}
+
+function renderDocumentBlockchainTab(doc) {
+  const target = document.getElementById("doc-tab-blockchain");
+
+  function renderDetail(record) {
+    target.innerHTML = `
+      <div class="detail-grid">
+        <div class="detail-card"><span>Document</span><strong>${escapeHtml(record.filename || doc.name)}</strong></div>
+        <div class="detail-card"><span>Owner</span><strong>${record.ownerWallet ? shortHash(record.ownerWallet) : "Pending"}</strong></div>
+        <div class="detail-card"><span>Record Status</span><strong>${escapeHtml(String(record.status || "pending").replaceAll("_", " "))}</strong></div>
+        <div class="detail-card"><span>Block Number</span><strong>${record.blockNumber || "Pending"}</strong></div>
+        <div class="detail-card" style="grid-column:1/-1"><span>Transaction Hash</span><code>${record.registrationTxHash || "Pending"}</code></div>
+        <div class="detail-card" style="grid-column:1/-1"><span>Document Hash</span><code>${record.currentHash || doc.hash || "Pending"}</code></div>
+      </div>
+    `;
+  }
+
+  if (isDemoModeEnabled()) {
+    renderDetail({
+      filename: doc.name,
+      ownerWallet: state.user.walletAddress,
+      currentHash: doc.hash,
+      registrationTxHash: doc.txHash,
+      blockNumber: doc.blockNumber,
+      status: doc.verified ? "VERIFIED" : "PENDING"
+    });
+    return;
+  }
+
+  if (doc.blockchainDetail && doc.blockchainDetailLoadedFor === doc.id) {
+    renderDetail(doc.blockchainDetail);
+    return;
+  }
+
+  if (doc.blockchainDetailLoading) {
+    target.innerHTML = `<div class="empty-state">Loading blockchain record...</div>`;
+    return;
+  }
+
+  doc.blockchainDetailLoading = true;
+  target.innerHTML = `<div class="empty-state">Loading blockchain record...</div>`;
+
+  window.KryptoVaultApi.get(`/api/assets/${doc.id}/blockchain`)
+    .then((response) => {
+      const latestDoc = state.documents.find(item => item.id === doc.id) || doc;
+      latestDoc.blockchainDetail = normalizeBlockchainRecord(response?.blockchain || {});
+      latestDoc.blockchainDetailLoadedFor = doc.id;
+      latestDoc.blockchainDetailLoading = false;
+      if (currentDocId === doc.id) {
+        renderDetail(latestDoc.blockchainDetail);
+      }
+    })
+    .catch((error) => {
+      doc.blockchainDetailLoading = false;
+      if (currentDocId === doc.id) {
+        target.innerHTML = `<div class="empty-state">${escapeHtml(error?.message || "Blockchain record could not be loaded.")}</div>`;
+      }
+    });
 }
 
 window.openShare = function(docId) {
@@ -930,57 +1401,227 @@ window.openShare = function(docId) {
   openModal("shareModal");
 };
 
-function grantAccess() {
+function isWalletAddress(value) {
+  return /^0x[a-fA-F0-9]{40}$/.test(String(value || "").trim());
+}
+
+function unixNowSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function accessWindowFromDurationDays(days) {
+  const duration = Number(days);
+  if (!duration) {
+    return {
+      validFrom: 0,
+      validUntil: 0,
+      expiresAt: null
+    };
+  }
+
+  const validFrom = 0;
+  const validUntil = unixNowSeconds() + duration * 86400;
+  return {
+    validFrom,
+    validUntil,
+    expiresAt: validUntil * 1000
+  };
+}
+
+async function recoverOwnerDocumentAesKey(doc) {
+  if (!doc.blockchainAssetId) {
+    throw new Error("This document must be registered on-chain before sharing.");
+  }
+
+  const openResponse = await window.KryptoVaultApi.get(`/api/assets/${encodeURIComponent(doc.id)}/open`);
+  const openedAsset = openResponse?.asset || {};
+  const wrappingMetadata = openedAsset.wrappingMetadata;
+  const wrappedAESKey = openedAsset.EK_User;
+
+  if (!wrappedAESKey || !wrappingMetadata) {
+    throw new Error("Owner wrapped key metadata is missing for this document.");
+  }
+
+  let password;
+  if (doc.passwordProtectionEnabled || wrappingMetadata.algorithm === "PBKDF2-SHA-256+A256GCM") {
+    password = window.prompt("Enter this file's password to share it.");
+    if (!password) {
+      throw new Error("File password is required to share this password-protected document.");
+    }
+  }
+
+  return window.KryptoVaultCrypto.recoverDocumentAesKey({
+    wrappedAESKey,
+    wrappingMetadata,
+    walletAddress: state.user.walletAddress,
+    password
+  });
+}
+
+async function grantAccess() {
   const d = state.documents.find(x => x.id === currentDocId);
   if (!d) return;
-  const name = document.getElementById("shareName").value.trim();
+  const displayName = document.getElementById("shareName").value.trim();
   const recipient = document.getElementById("shareRecipient").value.trim();
-  if (!name || !recipient) return toast("Enter recipient name and email/wallet.");
+  if (!recipient) return toast("Enter recipient wallet address.");
 
   const duration = Number(document.getElementById("shareDuration").value);
-  const p = {
-    id: crypto.randomUUID(),
-    name,
-    recipient,
-    wallet: recipient.startsWith("0x") ? recipient : randomHex(20),
-    role: document.getElementById("shareRole").value,
-    expiresAt: duration ? Date.now() + duration * 86400000 : null,
-    reason: document.getElementById("shareReason").value.trim(),
-    active: true
-  };
-  d.permissions.push(p);
-  d.txHash = randomHex(32);
-  addActivity("Access granted", `${name} received ${p.role} access to ${d.name}`);
-  addActivity("Blockchain permission recorded", `Mock permission transaction created for ${d.name}`);
-  closeModal("shareModal");
-  saveState();
-  toast("Access granted and mock transaction recorded.");
+  const accessType = document.getElementById("shareRole").value;
+  const reason = document.getElementById("shareReason").value.trim();
+
+  if (isDemoModeEnabled()) {
+    const p = {
+      id: crypto.randomUUID(),
+      name: displayName || shortHash(recipient),
+      recipient,
+      wallet: recipient.startsWith("0x") ? recipient : randomHex(20),
+      role: accessType,
+      expiresAt: duration ? Date.now() + duration * 86400000 : null,
+      reason,
+      active: true
+    };
+    d.permissions.push(p);
+    d.txHash = randomHex(32);
+    addActivity("Access granted", `${p.name} received ${p.role} access to ${d.name}`);
+    addActivity("Blockchain permission recorded", `Mock permission transaction created for ${d.name}`);
+    closeModal("shareModal");
+    saveState();
+    toast("Access granted and mock transaction recorded.");
+    return;
+  }
+
+  if (!isWalletAddress(recipient)) return toast("Enter a valid recipient wallet address.");
+  if (accessType !== "READ" && accessType !== "WRITE") return toast("Choose READ or WRITE access.");
+  if (!d.blockchainAssetId || d.blockchainVerificationStatus !== "verified") {
+    return toast("This document must be registered and verified on-chain before sharing.");
+  }
+  if (!window.KryptoVaultApi || !window.KryptoVaultCrypto || !window.KryptoVaultBlockchain) {
+    return toast("Sharing services are not available.");
+  }
+
+  const grantButton = document.getElementById("grantAccessBtn");
+  const previousButtonText = grantButton.textContent;
+  grantButton.disabled = true;
+  grantButton.textContent = "Granting...";
+
+  try {
+    const recipientKey = await window.KryptoVaultCrypto.getPublicEncryptionKey(recipient);
+    if (!recipientKey?.publicEncryptionKey) {
+      throw new Error("Recipient public encryption key was not found.");
+    }
+
+    const aesKey = await recoverOwnerDocumentAesKey(d);
+    const wrappedAESKey = await window.KryptoVaultCrypto.wrapDocumentAesKey(aesKey, recipientKey.publicEncryptionKey);
+    const wrappingMetadata = {
+      algorithm: "RSA-OAEP",
+      keyId: `recipient:${recipientKey.walletAddress || recipient.toLowerCase()}`
+    };
+    const accessWindow = accessWindowFromDurationDays(duration);
+    const grantTx = await window.KryptoVaultBlockchain.grantAccess(
+      d.blockchainAssetId,
+      recipient,
+      accessType,
+      accessWindow.validFrom,
+      accessWindow.validUntil
+    );
+    const receipt = await grantTx.wait(1);
+    if (!receipt || Number(receipt.status) !== 1) {
+      throw new Error("Blockchain access grant transaction failed.");
+    }
+
+    const syncResult = await window.KryptoVaultApi.post(`/api/assets/${d.id}/access/grant-sync`, {
+      granteeWallet: recipient,
+      wrappedAESKey,
+      accessType,
+      validFrom: accessWindow.validFrom,
+      validUntil: accessWindow.validUntil,
+      reason,
+      ...(displayName ? { granteeDisplayName: displayName } : {}),
+      blockchainTransactionHash: grantTx.hash,
+      wrappingMetadata
+    });
+
+    await refreshWorkspaceState();
+    const refreshedDoc = state.documents.find(x => x.id === d.id) || d;
+    await loadDocumentAccessGrants(refreshedDoc, true);
+    const syncedGrant = syncResult?.accessGrant;
+    const recipientLabel = syncedGrant?.granteeDisplayName || displayName || shortHash(recipient);
+    addActivity("Access granted", `${recipientLabel} received ${accessType} access to ${refreshedDoc.name}`);
+    addActivity("Blockchain permission recorded", `Access grant transaction ${shortHash(grantTx.hash)} confirmed for ${refreshedDoc.name}`);
+    currentDocId = refreshedDoc.id;
+    closeModal("shareModal");
+    saveState();
+    toast("Access granted on-chain.");
+  } catch (error) {
+    toastError(error, "Access grant failed.");
+  } finally {
+    grantButton.disabled = false;
+    grantButton.textContent = previousButtonText;
+  }
 }
 
 window.openRevoke = function(docId, permId) {
   const d = state.documents.find(x => x.id === docId);
-  const p = d?.permissions.find(x => x.id === permId);
+  const p = isDemoModeEnabled()
+    ? d?.permissions.find(x => x.id === permId)
+    : (d?.accessGrants || []).find(x => x.id === permId);
   if (!d || !p) return;
   pendingRevoke = { docId, permId };
   document.getElementById("revokeText").textContent = `Revoke ${p.name}'s access to ${d.name}?`;
   openModal("revokeModal");
 };
 
-function confirmRevoke() {
+async function confirmRevoke() {
   if (!pendingRevoke) return;
   const d = state.documents.find(x => x.id === pendingRevoke.docId);
-  const p = d?.permissions.find(x => x.id === pendingRevoke.permId);
+  const p = isDemoModeEnabled()
+    ? d?.permissions.find(x => x.id === pendingRevoke.permId)
+    : (d?.accessGrants || []).find(x => x.id === pendingRevoke.permId);
   if (!d || !p) return;
-  p.active = false;
   const mode = document.querySelector('input[name="revokeMode"]:checked').value;
-  addActivity("Access revoked", `${p.name} lost access to ${d.name}`);
-  if (mode === "strong") {
-    addActivity("Encryption key rotated", `Strong revocation simulated for ${d.name}`);
+
+  if (isDemoModeEnabled()) {
+    p.active = false;
+    d.txHash = randomHex(32);
+    addActivity("Access revoked", `${p.name} lost access to ${d.name}`);
+    if (mode === "strong") {
+      addActivity("Encryption key rotated", `Strong revocation simulated for ${d.name}`);
+    }
+    closeModal("revokeModal");
+    saveState();
+    toast(mode === "strong" ? "Access revoked + key rotation simulated." : "Access revoked.");
+    return;
   }
-  d.txHash = randomHex(32);
-  closeModal("revokeModal");
-  saveState();
-  toast(mode === "strong" ? "Access revoked + key rotation simulated." : "Access revoked.");
+
+  if (!window.KryptoVaultBlockchain) return toast("Blockchain service is not available.");
+  if (!d.blockchainAssetId || d.blockchainVerificationStatus !== "verified") {
+    return toast("This document must be registered and verified on-chain before revoking access.");
+  }
+  if (!isWalletAddress(p.wallet || p.recipient)) return toast("Recipient wallet is invalid.");
+
+  const revokeButton = document.getElementById("confirmRevokeBtn");
+  const previousButtonText = revokeButton.textContent;
+  revokeButton.disabled = true;
+  revokeButton.textContent = "Revoking...";
+
+  try {
+    const tx = await window.KryptoVaultBlockchain.revokeAccess(d.blockchainAssetId, p.wallet || p.recipient);
+    const receipt = await tx.wait(1);
+    if (!receipt || Number(receipt.status) !== 1) {
+      throw new Error("Blockchain revoke transaction failed.");
+    }
+    await loadDocumentAccessGrants(d, true);
+    addActivity("Access revoked", `${p.name} lost access to ${d.name}`);
+    addActivity("Blockchain permission revoked", `Revoke transaction ${shortHash(tx.hash)} confirmed for ${d.name}`);
+    closeModal("revokeModal");
+    saveState();
+    toast("Access revoked on-chain.");
+  } catch (error) {
+    toastError(error, "Access revocation failed.");
+  } finally {
+    revokeButton.disabled = false;
+    revokeButton.textContent = previousButtonText;
+  }
 }
 
 window.verifyIntegrity = function(docId) {
@@ -1000,14 +1641,28 @@ window.simulateTamper = function(docId) {
   toast(d.tampered ? "Tamper mode ON. Integrity checks will fail." : "Tamper mode cleared.");
 };
 
-window.simulateSharedOpen = async function(sharedId) {
+window.openSharedDocument = async function(sharedId) {
   const s = state.shared.find(x => x.id === sharedId);
   if (!s) return;
+  if (isDemoModeEnabled()) {
   toast("Checking wallet → permission → decryption simulation...");
-  await delay(800);
-  addActivity("Shared document opened", `${s.name} opened after simulated access verification`);
-  saveState();
-  toast("Access granted. Document decryption simulated.");
+    await delay(800);
+    addActivity("Shared document opened", `${s.name} opened after simulated access verification`);
+    saveState();
+    toast("Access granted. Document decryption simulated.");
+    return;
+  }
+
+  if (!window.KryptoVaultApi) return toast("Document API is not available.");
+
+  try {
+    await window.KryptoVaultApi.get(`/api/assets/${encodeURIComponent(s.assetId || s.id)}/open`);
+    addActivity("Shared document opened", `${s.name} opened after backend and blockchain access verification`);
+    saveState();
+    toast("Access verified. Encrypted document metadata loaded.");
+  } catch (error) {
+    toast(error?.message || "Shared document could not be opened.");
+  }
 };
 
 window.moveDocument = function(docId) {
@@ -1015,34 +1670,65 @@ window.moveDocument = function(docId) {
   if (!doc) return;
   currentDocId = docId;
   const select = document.getElementById("moveFolderSelect");
-  select.innerHTML = state.folders.map(folder => `
+  select.innerHTML = `
+    <option value="" ${doc.folderId ? "" : "selected"}>Unfiled</option>
+    ${state.folders.map(folder => `
     <option value="${folder.id}" ${folder.id === doc.folderId ? "selected" : ""}>${escapeHtml(folder.name)}</option>
-  `).join("");
+  `).join("")}
+  `;
   document.getElementById("moveDocumentName").textContent = doc.name;
   openModal("moveFolderModal");
 };
 
-function confirmMoveDocument() {
+async function confirmMoveDocument() {
   const doc = state.documents.find(d => d.id === currentDocId);
   if (!doc) return;
-  const newFolderId = document.getElementById("moveFolderSelect").value;
-  if (!newFolderId) return toast("Choose a folder.");
+  const newFolderId = document.getElementById("moveFolderSelect").value || null;
   const oldFolder = folderName(doc.folderId);
-  doc.folderId = newFolderId;
-  addActivity("Document moved", `${doc.name} moved from ${oldFolder} to ${folderName(newFolderId)}`);
-  closeModal("moveFolderModal");
-  saveState();
-  toast("Document moved successfully.");
+
+  if (isDemoModeEnabled()) {
+    doc.folderId = newFolderId;
+    addActivity("Document moved", `${doc.name} moved from ${oldFolder} to ${folderName(newFolderId)}`);
+    closeModal("moveFolderModal");
+    saveState();
+    toast("Document moved successfully.");
+    return;
+  }
+
+  try {
+    await window.KryptoVaultApi.patch(`/api/assets/${doc.id}/folder`, {
+      folderId: newFolderId
+    });
+    closeModal("moveFolderModal");
+    await refreshWorkspaceState();
+    toast("Document moved successfully.");
+  } catch (error) {
+    toast(error?.message || "Document could not be moved.");
+  }
 }
 
-function createFolder() {
+async function createFolder() {
   const name = document.getElementById("folderNameInput").value.trim();
   if (!name) return toast("Enter a folder name.");
-  state.folders.push({ id: `folder-${Date.now()}`, name, createdAt: Date.now() });
-  document.getElementById("folderNameInput").value = "";
-  closeModal("folderModal");
-  addActivity("Folder created", `${name} created`);
-  saveState();
+
+  if (isDemoModeEnabled()) {
+    state.folders.push({ id: `folder-${Date.now()}`, name, createdAt: Date.now() });
+    document.getElementById("folderNameInput").value = "";
+    closeModal("folderModal");
+    addActivity("Folder created", `${name} created`);
+    saveState();
+    return;
+  }
+
+  try {
+    await window.KryptoVaultApi.post("/api/folders", { name });
+    document.getElementById("folderNameInput").value = "";
+    closeModal("folderModal");
+    await refreshWorkspaceState();
+    toast("Folder created.");
+  } catch (error) {
+    toast(error?.message || "Folder could not be created.");
+  }
 }
 
 async function connectWallet() {
@@ -1105,7 +1791,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("openUploadBtn").addEventListener("click", () => { resetUploadModal(); openModal("uploadModal"); });
   document.getElementById("uploadFromDocs").addEventListener("click", () => { resetUploadModal(); openModal("uploadModal"); });
-  document.getElementById("secureUploadBtn").addEventListener("click", startSecureUpload);
+  document.getElementById("secureUploadBtn").addEventListener("click", startEncryptedUpload);
   document.getElementById("closeUploadSuccess").addEventListener("click", () => { closeModal("uploadModal"); switchPage("documents"); });
 
   const uploadInput = document.getElementById("uploadFile");
@@ -1140,6 +1826,9 @@ document.addEventListener("DOMContentLoaded", () => {
       document.querySelectorAll("[data-doc-tab]").forEach(t => t.classList.toggle("active", t === tab));
       document.querySelectorAll(".doc-tab").forEach(p => p.classList.remove("active"));
       document.getElementById(`doc-tab-${tab.dataset.docTab}`).classList.add("active");
+      if (tab.dataset.docTab === "access" && currentDocId) {
+        renderDocumentModal();
+      }
     });
   });
 

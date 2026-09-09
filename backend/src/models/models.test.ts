@@ -1,7 +1,10 @@
 import mongoose from "mongoose";
 import { describe, expect, it } from "vitest";
+import { AccessGrantModel } from "./access-grant.js";
+import { AssetAuditEventModel } from "./asset-audit-event.js";
 import { AssetModel } from "./asset.js";
 import { AssetVersionModel } from "./asset-version.js";
+import { FolderModel } from "./folder.js";
 import { forbiddenSensitiveFields } from "./schema-guards.js";
 import { UserModel } from "./user.js";
 import { WrappedKeyModel } from "./wrapped-key.js";
@@ -10,7 +13,15 @@ const validWallet = "0x1111111111111111111111111111111111111111";
 const validSha256 = "a".repeat(64);
 const validObjectId = new mongoose.Types.ObjectId();
 
-const modelsToCheck = [UserModel, AssetModel, WrappedKeyModel, AssetVersionModel];
+const modelsToCheck = [
+  UserModel,
+  AssetModel,
+  WrappedKeyModel,
+  AssetVersionModel,
+  FolderModel,
+  AssetAuditEventModel,
+  AccessGrantModel
+];
 
 describe("Secure Vault models", () => {
   it("does not define forbidden sensitive fields", () => {
@@ -59,12 +70,103 @@ describe("Secure Vault models", () => {
       ownerWallet: validWallet,
       filename: "encrypted-document.bin",
       sha256: validSha256,
-      passwordProtectionEnabled: false
+      passwordProtectionEnabled: false,
+      folderId: validObjectId
     });
 
     await expect(asset.validate()).resolves.toBeUndefined();
     expect(AssetModel.schema.path("plaintextFile")).toBeUndefined();
     expect(AssetModel.schema.path("fileContents")).toBeUndefined();
+  });
+
+  it("validates Folder organization metadata only", async () => {
+    const folder = new FolderModel({
+      ownerWallet: validWallet.toUpperCase(),
+      name: "Legal Documents",
+      parentFolderId: validObjectId
+    });
+
+    await expect(folder.validate()).resolves.toBeUndefined();
+    expect(folder.ownerWallet).toBe(validWallet);
+    expect(FolderModel.schema.path("plaintextFile")).toBeUndefined();
+    expect(FolderModel.schema.path("aesKey")).toBeUndefined();
+  });
+
+  it("validates AssetAuditEvent organization metadata only", async () => {
+    const auditEvent = new AssetAuditEventModel({
+      assetId: validObjectId,
+      ownerWallet: validWallet.toUpperCase(),
+      actorWallet: validWallet.toUpperCase(),
+      eventType: "ASSET_FOLDER_MOVED",
+      fromFolderId: null,
+      toFolderId: new mongoose.Types.ObjectId()
+    });
+
+    await expect(auditEvent.validate()).resolves.toBeUndefined();
+    expect(auditEvent.ownerWallet).toBe(validWallet);
+    expect(auditEvent.actorWallet).toBe(validWallet);
+    expect(AssetAuditEventModel.schema.path("plaintextFile")).toBeUndefined();
+    expect(AssetAuditEventModel.schema.path("aesKey")).toBeUndefined();
+  });
+
+  it("validates AccessGrant as non-authoritative blockchain transaction metadata only", async () => {
+    const grant = new AccessGrantModel({
+      assetId: validObjectId,
+      ownerWallet: validWallet.toUpperCase(),
+      granteeWallet: "0x2222222222222222222222222222222222222222".toUpperCase(),
+      granteeDisplayName: "Alice",
+      accessType: "READ",
+      validFrom: new Date("2026-09-09T00:00:00.000Z"),
+      validUntil: new Date("2026-09-10T00:00:00.000Z"),
+      reason: "Review",
+      blockchainTxHash: `0x${"c".repeat(64)}`,
+      status: "ACTIVE"
+    });
+
+    await expect(grant.validate()).resolves.toBeUndefined();
+    expect(grant.ownerWallet).toBe(validWallet);
+    expect(grant.granteeWallet).toBe("0x2222222222222222222222222222222222222222");
+    expect(AccessGrantModel.schema.path("wrappedAESKey")).toBeUndefined();
+    expect(AccessGrantModel.schema.path("aesKey")).toBeUndefined();
+    expect(AccessGrantModel.schema.path("rawKey")).toBeUndefined();
+  });
+
+  it("validates AccessGrant revocation and expiry windows", async () => {
+    await expect(
+      new AccessGrantModel({
+        assetId: validObjectId,
+        ownerWallet: validWallet,
+        granteeWallet: "0x2222222222222222222222222222222222222222",
+        accessType: "WRITE",
+        validFrom: new Date("2026-09-10T00:00:00.000Z"),
+        validUntil: new Date("2026-09-09T00:00:00.000Z"),
+        blockchainTxHash: `0x${"c".repeat(64)}`,
+        status: "ACTIVE"
+      }).validate()
+    ).rejects.toThrow();
+
+    await expect(
+      new AccessGrantModel({
+        assetId: validObjectId,
+        ownerWallet: validWallet,
+        granteeWallet: "0x2222222222222222222222222222222222222222",
+        accessType: "READ",
+        blockchainTxHash: `0x${"d".repeat(64)}`,
+        status: "REVOKED"
+      }).validate()
+    ).rejects.toThrow();
+
+    await expect(
+      new AccessGrantModel({
+        assetId: validObjectId,
+        ownerWallet: validWallet,
+        granteeWallet: "0x2222222222222222222222222222222222222222",
+        accessType: "READ",
+        blockchainTxHash: `0x${"e".repeat(64)}`,
+        status: "REVOKED",
+        revokedAt: new Date("2026-09-09T01:00:00.000Z")
+      }).validate()
+    ).resolves.toBeUndefined();
   });
 
   it("validates WrappedKey as wrapped key material only", async () => {
@@ -82,6 +184,31 @@ describe("Secure Vault models", () => {
     await expect(wrappedKey.validate()).resolves.toBeUndefined();
     expect(WrappedKeyModel.schema.path("aesKey")).toBeUndefined();
     expect(WrappedKeyModel.schema.path("rawKey")).toBeUndefined();
+  });
+
+  it("validates password-wrapped key metadata without storing password material", async () => {
+    const wrappedKey = new WrappedKeyModel({
+      assetId: validObjectId,
+      userWallet: validWallet,
+      wrappedAESKey: "password-encrypted-aes-key",
+      version: 1,
+      wrappingMetadata: {
+        algorithm: "PBKDF2-SHA-256+A256GCM",
+        kdf: {
+          algorithm: "PBKDF2-SHA-256",
+          iterations: 310000,
+          salt: "base64-random-salt"
+        },
+        keyEncryption: {
+          algorithm: "AES-256-GCM",
+          iv: "base64-wrapping-iv"
+        }
+      }
+    });
+
+    await expect(wrappedKey.validate()).resolves.toBeUndefined();
+    expect(WrappedKeyModel.schema.path("password")).toBeUndefined();
+    expect(WrappedKeyModel.schema.path("passwordDerivedSecretKey")).toBeUndefined();
   });
 
   it("rejects unapproved wrapping metadata fields", async () => {
@@ -140,6 +267,14 @@ describe("Secure Vault models", () => {
   it("defines expected indexes", () => {
     expect(UserModel.schema.indexes()).toContainEqual([{ walletAddress: 1 }, { unique: true }]);
     expect(AssetModel.schema.indexes()).toContainEqual([{ ownerWallet: 1, status: 1 }, {}]);
+    expect(AssetModel.schema.indexes()).toContainEqual([{ ownerWallet: 1, folderId: 1 }, {}]);
+    expect(AssetAuditEventModel.schema.indexes()).toContainEqual([{ assetId: 1, createdAt: -1 }, {}]);
+    expect(AssetAuditEventModel.schema.indexes()).toContainEqual([{ ownerWallet: 1, createdAt: -1 }, {}]);
+    expect(AccessGrantModel.schema.indexes()).toContainEqual([{ assetId: 1, granteeWallet: 1, status: 1 }, {}]);
+    expect(AccessGrantModel.schema.indexes()).toContainEqual([{ granteeWallet: 1, status: 1 }, {}]);
+    expect(AccessGrantModel.schema.indexes()).toContainEqual([{ ownerWallet: 1, assetId: 1 }, {}]);
+    expect(AccessGrantModel.schema.indexes()).toContainEqual([{ blockchainTxHash: 1 }, { unique: true }]);
+    expect(FolderModel.schema.indexes()).toContainEqual([{ ownerWallet: 1, parentFolderId: 1 }, {}]);
     expect(WrappedKeyModel.schema.indexes()).toContainEqual([
       { assetId: 1, userWallet: 1, version: 1 },
       { unique: true }

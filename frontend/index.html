@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KryptoVault — Blockchain Document Protection Demo</title>
-  <link rel="stylesheet" href="styles%20(1).css" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div id="toast" class="toast"></div>
@@ -413,16 +413,15 @@
         <button class="icon-btn" data-close="shareModal">×</button>
       </div>
       <label>Recipient Name
-        <input class="input" id="shareName" placeholder="Ananya Gupta" />
+        <input class="input" id="shareName" placeholder="Optional display name" />
       </label>
-      <label>Email / Wallet Address
-        <input class="input" id="shareRecipient" placeholder="ananya@example.com or 0x..." />
+      <label>Recipient Wallet Address
+        <input class="input" id="shareRecipient" placeholder="0x..." />
       </label>
       <label>Permission
         <select class="input" id="shareRole">
-          <option value="VIEW">View</option>
-          <option value="DOWNLOAD">View + Download</option>
-          <option value="EDIT">View + Edit</option>
+          <option value="READ">READ</option>
+          <option value="WRITE">WRITE</option>
         </select>
       </label>
       <label>Access Duration
@@ -524,8 +523,11 @@
     </div>
   </div>
 
+  <script src="node_modules/ethers/dist/ethers.umd.min.js"></script>
   <script src="api.js"></script>
   <script src="crypto.js"></script>
-  <script src="app%20(1).js"></script>
+  <script src="blockchain-config.js"></script>
+  <script src="blockchain.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

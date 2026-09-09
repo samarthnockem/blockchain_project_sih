@@ -12,7 +12,14 @@ const envSchema = z.object({
       return false;
     }
   }, "MONGODB_URI must be a valid MongoDB connection string"),
-  CORS_ORIGIN: z.string().min(1).default("http://localhost:5173"),
+  MONGODB_DATABASE: z
+    .string()
+    .trim()
+    .min(1)
+    .max(63)
+    .regex(/^[^/\\."$*<>:|?]+$/, "MONGODB_DATABASE contains invalid characters")
+    .optional(),
+  CORS_ORIGIN: z.string().min(1).default("http://localhost:8000"),
   JSON_BODY_LIMIT: z.string().min(1).default("1mb"),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),

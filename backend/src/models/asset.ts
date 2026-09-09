@@ -21,6 +21,20 @@ const assetSchema = new Schema(
       minlength: 1,
       maxlength: 255
     },
+    size: {
+      type: Number,
+      required: true,
+      min: 0,
+      default: 0
+    },
+    mimeType: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 1,
+      maxlength: 255,
+      default: "application/octet-stream"
+    },
     blockchainAssetId: {
       type: String,
       trim: true,
@@ -44,14 +58,37 @@ const assetSchema = new Schema(
     status: {
       type: String,
       required: true,
-      enum: ["active", "archived", "revoked"],
-      default: "active",
+      enum: ["PENDING_BLOCKCHAIN", "ACTIVE", "ARCHIVED", "REVOKED", "active", "archived", "revoked"],
+      default: "PENDING_BLOCKCHAIN",
       index: true
     },
     passwordProtectionEnabled: {
       type: Boolean,
       required: true,
       default: false
+    },
+    folderId: {
+      type: Schema.Types.ObjectId,
+      ref: "Folder",
+      required: false,
+      default: null,
+      index: true
+    },
+    registrationTransactionHash: {
+      type: String,
+      trim: true,
+      match: /^0x[a-fA-F0-9]{64}$/,
+      sparse: true
+    },
+    registrationBlockNumber: {
+      type: Number,
+      min: 0
+    },
+    blockchainVerificationStatus: {
+      type: String,
+      required: true,
+      enum: ["pending", "verified", "failed"],
+      default: "pending"
     }
   },
   {
@@ -61,6 +98,7 @@ const assetSchema = new Schema(
 );
 
 assetSchema.index({ ownerWallet: 1, status: 1 });
+assetSchema.index({ ownerWallet: 1, folderId: 1 });
 
 assertNoForbiddenFields(assetSchema, "Asset");
 

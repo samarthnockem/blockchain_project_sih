@@ -50,4 +50,68 @@ assert.equal(
   "document-encryption-identity:0xa111111111111111111111111111111111111111"
 );
 
-console.log("frontend crypto tests passed");
+async function runAsyncTests() {
+  const keyPair = await webcrypto.subtle.generateKey(
+    {
+      name: "RSA-OAEP",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256"
+    },
+    true,
+    ["wrapKey", "unwrapKey"]
+  );
+  const publicKeyBytes = await webcrypto.subtle.exportKey("spki", keyPair.publicKey);
+  const publicEncryptionKey = helpers.arrayBufferToBase64(publicKeyBytes);
+  const plaintext = new TextEncoder().encode("hello");
+  const file = {
+    arrayBuffer: async () => plaintext.buffer
+  };
+
+  const encrypted = await helpers.encryptFileWithPublicKey(file, publicEncryptionKey, "owner-key-1");
+  const encryptedAgain = await helpers.encryptFileWithPublicKey(file, publicEncryptionKey, "owner-key-1");
+
+  assert.equal(encrypted.sha256, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+  assert.equal(encrypted.encryptionMetadata.algorithm, "AES-256-GCM");
+  assert.equal(encrypted.encryptionMetadata.tag, "included-in-ciphertext");
+  assert.equal(encrypted.wrappingMetadata.algorithm, "RSA-OAEP");
+  assert.equal(encrypted.wrappingMetadata.keyId, "owner-key-1");
+  assert(encrypted.encryptedBytes.byteLength > plaintext.byteLength);
+  assert(encrypted.wrappedAESKey.length > 0);
+  assert.notEqual(encrypted.encryptionMetadata.iv, encryptedAgain.encryptionMetadata.iv);
+
+  const aesKey = await context.window.KryptoVaultCrypto.generateDocumentAesKey();
+  const passwordWrapped = await helpers.wrapDocumentAesKeyWithPassword(aesKey, "correct horse battery staple", {
+    iterations: 210000
+  });
+  const recoveredKey = await helpers.unwrapPasswordWrappedDocumentAesKey(
+    passwordWrapped.wrappedAESKey,
+    "correct horse battery staple",
+    passwordWrapped.wrappingMetadata
+  );
+  const originalRawKey = await webcrypto.subtle.exportKey("raw", aesKey);
+  const recoveredRawKey = await webcrypto.subtle.exportKey("raw", recoveredKey);
+
+  assert.equal(passwordWrapped.wrappingMetadata.algorithm, "PBKDF2-SHA-256+A256GCM");
+  assert.equal(passwordWrapped.wrappingMetadata.kdf.algorithm, "PBKDF2-SHA-256");
+  assert.equal(passwordWrapped.wrappingMetadata.kdf.iterations, 210000);
+  assert.equal(passwordWrapped.wrappingMetadata.keyEncryption.algorithm, "AES-256-GCM");
+  assert.deepEqual(new Uint8Array(recoveredRawKey), new Uint8Array(originalRawKey));
+  await assert.rejects(
+    () => helpers.unwrapPasswordWrappedDocumentAesKey(
+      passwordWrapped.wrappedAESKey,
+      "wrong password",
+      passwordWrapped.wrappingMetadata
+    ),
+    /operation-specific/
+  );
+}
+
+runAsyncTests()
+  .then(() => {
+    console.log("frontend crypto tests passed");
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });

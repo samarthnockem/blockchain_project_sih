@@ -8,14 +8,64 @@ const wrappingMetadataSchema = new Schema(
     algorithm: {
       type: String,
       required: true,
-      enum: ["RSA-OAEP"]
+      enum: ["RSA-OAEP", "PBKDF2-SHA-256+A256GCM"]
     },
     keyId: {
       type: String,
-      required: true,
       trim: true,
       minlength: 1,
       maxlength: 255
+    },
+    kdf: {
+      type: new Schema(
+        {
+          algorithm: {
+            type: String,
+            required: true,
+            enum: ["PBKDF2-SHA-256"]
+          },
+          iterations: {
+            type: Number,
+            required: true,
+            min: 210000
+          },
+          salt: {
+            type: String,
+            required: true,
+            trim: true,
+            minlength: 16,
+            maxlength: 4096
+          }
+        },
+        {
+          _id: false,
+          strict: "throw"
+        }
+      ),
+      required: false
+    },
+    keyEncryption: {
+      type: new Schema(
+        {
+          algorithm: {
+            type: String,
+            required: true,
+            enum: ["AES-256-GCM"]
+          },
+          iv: {
+            type: String,
+            required: true,
+            trim: true,
+            minlength: 16,
+            maxlength: 4096
+          }
+        },
+        {
+          _id: false,
+          strict: "throw"
+        }
+      ),
+      required: false
     }
   },
   {
@@ -23,6 +73,23 @@ const wrappingMetadataSchema = new Schema(
     strict: "throw"
   }
 );
+
+wrappingMetadataSchema.pre("validate", function validateWrappingMetadata() {
+  const metadata = this as {
+    algorithm?: string;
+    keyId?: string;
+    kdf?: unknown;
+    keyEncryption?: unknown;
+  };
+
+  if (metadata.algorithm === "RSA-OAEP" && (!metadata.keyId || metadata.kdf || metadata.keyEncryption)) {
+    throw new Error("RSA-OAEP wrapping metadata requires only keyId");
+  }
+
+  if (metadata.algorithm === "PBKDF2-SHA-256+A256GCM" && (metadata.keyId || !metadata.kdf || !metadata.keyEncryption)) {
+    throw new Error("Password wrapping metadata requires kdf and keyEncryption metadata");
+  }
+});
 
 const wrappedKeySchema = new Schema(
   {
