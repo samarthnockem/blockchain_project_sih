@@ -13,9 +13,10 @@ vanilla HTML, CSS, and JavaScript:
 5. blockchain-config.js - blockchain config pointer
 6. blockchain.js - MetaMask + ethers.js contract transaction helpers
 7. app.js - current UI behavior and backend integration
-8. README.md - this guide
-9. server.js - local static development server
-10. package.json - frontend npm scripts
+8. KryptoVaultAccess.abi.json - deployable static contract ABI
+9. README.md - this guide
+10. server.js - local static development server
+11. package.json - frontend npm scripts
 
 HOW TO RUN THE FRONTEND DEMO
 ----------------------------
@@ -44,13 +45,17 @@ For Sepolia real mode, set the deployed contract address in
 CONTRACT_ADDRESS=<deployed Sepolia contract address>
 EXPECTED_CHAIN_ID=11155111
 
-The frontend dev server also exposes generated contract deployment JSON from:
+The deployed and local frontend both load the contract ABI from:
 
-../blockchain/exports/KryptoVaultAccess.local.json
+http://localhost:8000/KryptoVaultAccess.abi.json
 
-through this browser URL:
+Keep it synchronized from the Hardhat artifact by running this after compiling
+the contract:
 
-http://localhost:8000/blockchain/exports/KryptoVaultAccess.local.json
+npm run export:abi
+
+from the `blockchain/` folder. This copies the generated ABI into the frontend
+static root; Hardhat is not required at frontend runtime.
 
 Hardhat Local remains available only as an optional development fallback. Run
 `npm run deploy:local` in `blockchain/` after starting the Hardhat node if you

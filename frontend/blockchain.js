@@ -11,7 +11,7 @@
     expectedChainId: 11155111,
     expectedChainName: "Sepolia",
     deploymentUrl: "",
-    abiUrl: "/blockchain/exports/KryptoVaultAccess.abi.json",
+    abiUrl: "/KryptoVaultAccess.abi.json",
     rpcUrls: ["https://rpc.sepolia.org"],
     blockExplorerUrls: ["https://sepolia.etherscan.io"],
     nativeCurrency: {

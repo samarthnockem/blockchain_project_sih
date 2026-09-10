@@ -9,6 +9,8 @@ const appSource = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
 assert(blockchainSource.includes("wallet_switchEthereumChain"), "blockchain helper must switch MetaMask networks");
 assert(blockchainSource.includes("wallet_addEthereumChain"), "blockchain helper must add unknown configured networks");
 assert(blockchainSource.includes("expectedChainId: 11155111"), "Sepolia chain ID must be the default expected chain");
+assert(blockchainSource.includes('abiUrl: "/KryptoVaultAccess.abi.json"'), "default ABI path must be deployable from the frontend static root");
+assert(!blockchainSource.includes("/blockchain/exports/KryptoVaultAccess.abi.json"), "production runtime must not load ABI from repository blockchain exports");
 assert(!blockchainSource.includes("http://127.0.0.1:8545"), "runtime blockchain helper must not depend on local RPC");
 assert(blockchainSource.includes("https://rpc.sepolia.org"), "Sepolia add-network metadata must use a public RPC URL");
 assert(appSource.includes("/integrity"), "Verify Integrity must call the backend integrity endpoint in real mode");
@@ -83,7 +85,7 @@ function createContext({ unknownChainOnce = false, contractCode = "0x60016001", 
         EXPECTED_CHAIN_NAME: "Sepolia",
         RPC_URLS: rpcUrls,
         BLOCK_EXPLORER_URLS: ["https://sepolia.etherscan.io"],
-        ABI_URL: "/blockchain/exports/KryptoVaultAccess.abi.json"
+        ABI_URL: "/KryptoVaultAccess.abi.json"
       }
     },
     fetch: async () => ({

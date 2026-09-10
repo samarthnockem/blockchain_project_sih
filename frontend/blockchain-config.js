@@ -4,5 +4,5 @@ window.KRYPTO_BLOCKCHAIN_CONFIG = {
   EXPECTED_CHAIN_NAME: "Sepolia",
   RPC_URLS: ["https://rpc.sepolia.org"],
   BLOCK_EXPLORER_URLS: ["https://sepolia.etherscan.io"],
-  ABI_URL: "/blockchain/exports/KryptoVaultAccess.abi.json"
+  ABI_URL: "/KryptoVaultAccess.abi.json"
 };

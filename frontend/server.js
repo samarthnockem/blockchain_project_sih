@@ -5,7 +5,6 @@ const { extname, isAbsolute, join, normalize, relative, resolve } = require("nod
 
 const PORT = Number(process.env.PORT || 8000);
 const ROOT = resolve(process.cwd());
-const BLOCKCHAIN_EXPORTS_ROOT = resolve(ROOT, "..", "blockchain", "exports");
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -22,18 +21,6 @@ const contentTypes = {
 
 function resolveRequestPath(urlPath) {
   const decodedPath = decodeURIComponent(urlPath.split("?")[0]);
-  if (decodedPath.startsWith("/blockchain/exports/")) {
-    const exportName = decodedPath.replace("/blockchain/exports/", "");
-    const filePath = normalize(join(BLOCKCHAIN_EXPORTS_ROOT, exportName));
-    const relativePath = relative(BLOCKCHAIN_EXPORTS_ROOT, filePath);
-
-    if (relativePath.startsWith("..") || isAbsolute(relativePath)) {
-      return null;
-    }
-
-    return filePath;
-  }
-
   const requestedPath = decodedPath === "/" ? "/index.html" : decodedPath;
   const filePath = normalize(join(ROOT, requestedPath));
   const relativePath = relative(ROOT, filePath);
