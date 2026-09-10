@@ -50,15 +50,16 @@ export function getSession(sessionId: string) {
 }
 
 export function buildSessionCookie(sessionId: string) {
+  const crossSiteCookie = env.CORS_ORIGIN.startsWith("https://");
   const cookieParts = [
     `${sessionCookieName}=${sessionId}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax",
+    crossSiteCookie ? "SameSite=None" : "SameSite=Lax",
     `Max-Age=${Math.floor(env.SESSION_TTL_MS / 1000)}`
   ];
 
-  if (env.NODE_ENV === "production") {
+  if (crossSiteCookie || env.NODE_ENV === "production") {
     cookieParts.push("Secure");
   }
 
@@ -66,9 +67,16 @@ export function buildSessionCookie(sessionId: string) {
 }
 
 export function buildClearSessionCookie() {
-  const cookieParts = [`${sessionCookieName}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0"];
+  const crossSiteCookie = env.CORS_ORIGIN.startsWith("https://");
+  const cookieParts = [
+    `${sessionCookieName}=`,
+    "Path=/",
+    "HttpOnly",
+    crossSiteCookie ? "SameSite=None" : "SameSite=Lax",
+    "Max-Age=0"
+  ];
 
-  if (env.NODE_ENV === "production") {
+  if (crossSiteCookie || env.NODE_ENV === "production") {
     cookieParts.push("Secure");
   }
 

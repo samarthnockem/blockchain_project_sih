@@ -2,7 +2,8 @@ import request from "supertest";
 import { Wallet } from "ethers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearChallengesForTests } from "../auth/challenges.js";
-import { clearSessionsForTests, sessionCookieName } from "../auth/session.js";
+import { buildSessionCookie, clearSessionsForTests, sessionCookieName } from "../auth/session.js";
+import { env } from "../config/env.js";
 import { createApp } from "../app.js";
 import { AuditEventModel } from "../models/audit-event.js";
 
@@ -64,6 +65,20 @@ describe("wallet authentication", () => {
       authenticated: true,
       walletAddress: wallet.address.toLowerCase()
     });
+  });
+
+  it("uses cross-site secure cookies for HTTPS frontend origins", () => {
+    const originalCorsOrigin = env.CORS_ORIGIN;
+    env.CORS_ORIGIN = "https://blockchain-project-sih-1.onrender.com";
+
+    try {
+      const cookie = buildSessionCookie("session-id");
+
+      expect(cookie).toContain("SameSite=None");
+      expect(cookie).toContain("Secure");
+    } finally {
+      env.CORS_ORIGIN = originalCorsOrigin;
+    }
   });
 
   it("rejects a wrong signature", async () => {
