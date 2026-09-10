@@ -556,6 +556,25 @@ function resetAccountScopedState(message = "Guest", walletAddress = "") {
   renderAll();
 }
 
+function assignWalletConnectionState(walletAddress, message = "Wallet connected - authenticating...") {
+  state.user = {
+    ...emptyUser(),
+    name: message,
+    walletAddress: normalizeWalletAddressForUi(walletAddress)
+  };
+  console.debug("[wallet] state assigned");
+  renderAll();
+  console.debug("[wallet] render called");
+}
+
+async function initializeWalletSession(walletAddress, message = "Wallet connected - authenticating...") {
+  const selectedWallet = normalizeWalletAddressForUi(walletAddress);
+  assignWalletConnectionState(selectedWallet, message);
+  const user = await authenticateWallet(selectedWallet);
+  await loadBackendState();
+  return user;
+}
+
 async function getSelectedMetaMaskAccount() {
   if (!window.ethereum?.request) return "";
   const accounts = await window.ethereum.request({ method: "eth_accounts" });
@@ -639,12 +658,12 @@ async function requestWalletAccount() {
   }
 
   const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+  console.debug("[wallet] accounts returned", accounts);
   if (!accounts?.[0]) {
     throw new Error("No MetaMask account was selected.");
   }
 
-  console.info("MetaMask detected");
-  console.info("MetaMask account returned", accounts[0]);
+  console.debug("[wallet] selected account", accounts[0]);
   return accounts[0];
 }
 
@@ -679,15 +698,9 @@ async function authenticateWallet(account) {
   const generation = accountStateGeneration;
   const walletAddress = account || await requestWalletAccount();
   const expectedWallet = normalizeWalletAddressForUi(walletAddress);
-  state.user = {
-    ...emptyUser(),
-    name: "Authenticating wallet...",
-    walletAddress: expectedWallet
-  };
-  console.info("wallet state updated", expectedWallet);
-  renderAll();
-  console.info("render wallet UI called");
+  assignWalletConnectionState(expectedWallet, "Authenticating wallet...");
 
+  console.debug("[wallet] auth started");
   const challenge = await requestLoginChallenge();
   const signature = await signLoginChallenge(walletAddress, challenge);
   if (generation !== accountStateGeneration) {
@@ -698,7 +711,7 @@ async function authenticateWallet(account) {
   }
 
   await verifySignedChallenge(challenge, signature);
-  console.info("backend auth success");
+  console.debug("[wallet] auth success");
   const user = await assertAuthenticatedWalletMatches(expectedWallet);
   if (generation !== accountStateGeneration) {
     throw new Error("Wallet authentication was superseded by another account change.");
@@ -722,8 +735,8 @@ async function handleWalletAccountChanged(accounts) {
 
   const nextWallet = normalizeWalletAddressForUi(accounts?.[0] || "");
   resetAccountScopedState(nextWallet ? "Switching account..." : "Guest", nextWallet);
-  console.info("wallet state updated", nextWallet);
-  console.info("render wallet UI called");
+  console.debug("[wallet] state assigned");
+  console.debug("[wallet] render called");
   await logoutWalletSession("Switching account...", false);
 
   if (!nextWallet) {
@@ -732,12 +745,12 @@ async function handleWalletAccountChanged(accounts) {
   }
 
   try {
-    await authenticateWallet(nextWallet);
-    await loadBackendState();
+    await initializeWalletSession(nextWallet, "Switching account...");
     toast("MetaMask account changed. Session re-authenticated.");
   } catch (_) {
-    console.info("backend auth failure");
-    await logoutWalletSession();
+    console.debug("[wallet] auth failure");
+    await logoutWalletSession("Guest", false);
+    resetAccountScopedState("Wallet connected - authentication failed", nextWallet);
     toast("MetaMask account changed. Please sign in again.");
   }
 }
@@ -749,17 +762,17 @@ async function restoreConnectedWallet() {
   if (!selectedWallet) return;
 
   resetAccountScopedState("Authenticating wallet...", selectedWallet);
-  console.info("MetaMask detected");
-  console.info("MetaMask account returned", selectedWallet);
-  console.info("wallet state updated", selectedWallet);
-  console.info("render wallet UI called");
+  console.debug("[wallet] accounts returned", [selectedWallet]);
+  console.debug("[wallet] selected account", selectedWallet);
+  console.debug("[wallet] state assigned");
+  console.debug("[wallet] render called");
 
   try {
-    await authenticateWallet(selectedWallet);
-    await loadBackendState();
+    await initializeWalletSession(selectedWallet, "Authenticating wallet...");
   } catch (_) {
-    console.info("backend auth failure");
-    await logoutWalletSession();
+    console.debug("[wallet] auth failure");
+    await logoutWalletSession("Guest", false);
+    resetAccountScopedState("Wallet connected - authentication failed", selectedWallet);
   }
 }
 
@@ -777,8 +790,7 @@ async function handleWalletChainChanged() {
 
     const selectedWallet = await getSelectedMetaMaskAccount();
     if (selectedWallet) {
-      await authenticateWallet(selectedWallet);
-      await loadBackendState();
+      await initializeWalletSession(selectedWallet, "Network changed...");
       toast("Network changed. Session re-authenticated.");
       return;
     }
@@ -2226,25 +2238,25 @@ async function createFolder() {
 
 async function connectWallet() {
   if (window.ethereum?.request && !isDemoModeEnabled()) {
+    let selectedWallet = "";
     try {
+      console.debug("[wallet] connect clicked");
       resetAccountScopedState("Connecting wallet...");
-      const selectedWallet = await requestWalletAccount();
-      state.user = {
-        ...emptyUser(),
-        name: "Wallet connected - authenticating...",
-        walletAddress: normalizeWalletAddressForUi(selectedWallet)
-      };
-      console.info("wallet state updated", state.user.walletAddress);
-      renderAll();
-      console.info("render wallet UI called");
-
-      const user = await authenticateWallet(selectedWallet);
-      await loadBackendState();
+      selectedWallet = normalizeWalletAddressForUi(await requestWalletAccount());
+      const user = await initializeWalletSession(selectedWallet);
       toast(`Wallet authenticated: ${shortHash(user.walletAddress)}`);
       return;
     } catch (err) {
-      console.info("backend auth failure");
-      await logoutWalletSession();
+      console.debug("[wallet] auth failure", {
+        status: err?.status || null,
+        message: err?.message || "Wallet authentication failed."
+      });
+      await logoutWalletSession("Guest", false);
+      if (selectedWallet) {
+        resetAccountScopedState("Wallet connected - authentication failed", selectedWallet);
+      } else {
+        resetAccountScopedState();
+      }
       if (err instanceof TypeError && /fetch/i.test(err.message || "")) {
         toast("Backend unavailable. Start the backend before authenticating your wallet.");
         return;
