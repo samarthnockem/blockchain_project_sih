@@ -27,9 +27,16 @@ Then open:
 
 http://localhost:8000
 
-The frontend API client defaults to:
+When the frontend is served locally, the API client uses:
 
 http://localhost:4000
+
+When deployed, it uses the production backend:
+
+https://blockchain-project-sih.onrender.com
+
+The `window.KRYPTO_API_BASE_URL` runtime override can still be used when a
+different backend endpoint is required.
 
 For Sepolia real mode, set the deployed contract address in
 `blockchain-config.js` using:

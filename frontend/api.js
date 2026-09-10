@@ -1,7 +1,12 @@
 (function () {
   "use strict";
 
-  const DEFAULT_API_BASE_URL = "http://localhost:4000";
+  const LOCAL_API_BASE_URL = "http://localhost:4000";
+  const PRODUCTION_API_BASE_URL = "https://blockchain-project-sih.onrender.com";
+  const DEFAULT_API_BASE_URL =
+    window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+      ? LOCAL_API_BASE_URL
+      : PRODUCTION_API_BASE_URL;
   const EMPTY_STATUSES = new Set([204, 205]);
   const KNOWN_STATUS_MESSAGES = {
     400: "The request was invalid.",
