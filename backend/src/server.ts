@@ -7,8 +7,9 @@ async function main() {
   await connectDatabase();
 
   const app = createApp();
-  const server = app.listen(env.PORT, () => {
-    logger.info({ port: env.PORT }, "Secure Vault backend listening");
+  const port = env.NODE_ENV === "production" ? Number(process.env.PORT ?? env.PORT) : 4000;
+  const server = app.listen(port, "0.0.0.0", () => {
+    logger.info({ port }, "Secure Vault backend listening");
   });
 
   const shutdown = (signal: NodeJS.Signals) => {
