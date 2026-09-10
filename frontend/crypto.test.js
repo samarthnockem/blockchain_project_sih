@@ -80,6 +80,22 @@ async function runAsyncTests() {
   assert(encrypted.wrappedAESKey.length > 0);
   assert.notEqual(encrypted.encryptionMetadata.iv, encryptedAgain.encryptionMetadata.iv);
 
+  const decrypted = await helpers.decryptBytesWithAesGcm(
+    encrypted.encryptedBytes,
+    await webcrypto.subtle.unwrapKey(
+      "raw",
+      Buffer.from(encrypted.wrappedAESKey, "base64"),
+      keyPair.privateKey,
+      { name: "RSA-OAEP" },
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    ),
+    encrypted.encryptionMetadata
+  );
+  assert.equal(await helpers.sha256Hex(decrypted), encrypted.sha256);
+  assert.deepEqual(new Uint8Array(decrypted), plaintext);
+
   const aesKey = await context.window.KryptoVaultCrypto.generateDocumentAesKey();
   const passwordWrapped = await helpers.wrapDocumentAesKeyWithPassword(aesKey, "correct horse battery staple", {
     iterations: 210000

@@ -10,7 +10,7 @@ vanilla HTML, CSS, and JavaScript:
 2. styles.css - visual design, dark/light theme, responsive layout
 3. api.js - small backend API client
 4. crypto.js - client-side document encryption identity helpers
-5. blockchain-config.js - safe local blockchain config pointer
+5. blockchain-config.js - blockchain config pointer
 6. blockchain.js - MetaMask + ethers.js contract transaction helpers
 7. app.js - current UI behavior and backend integration
 8. README.md - this guide
@@ -31,8 +31,13 @@ The frontend API client defaults to:
 
 http://localhost:4000
 
-The frontend dev server also exposes the generated local contract deployment
-JSON from:
+For Sepolia real mode, set the deployed contract address in
+`blockchain-config.js` using:
+
+CONTRACT_ADDRESS=<deployed Sepolia contract address>
+EXPECTED_CHAIN_ID=11155111
+
+The frontend dev server also exposes generated contract deployment JSON from:
 
 ../blockchain/exports/KryptoVaultAccess.local.json
 
@@ -40,8 +45,9 @@ through this browser URL:
 
 http://localhost:8000/blockchain/exports/KryptoVaultAccess.local.json
 
-Run `npm run deploy:local` in `blockchain/` after starting the Hardhat node so
-the frontend can load the current contract ABI, address, and chain ID.
+Hardhat Local remains available only as an optional development fallback. Run
+`npm run deploy:local` in `blockchain/` after starting the Hardhat node if you
+choose that fallback.
 
 FINAL AGREED ARCHITECTURE
 -------------------------

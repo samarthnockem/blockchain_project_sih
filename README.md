@@ -19,7 +19,33 @@ modals.
 
 ## Local Development
 
-Start the backend first:
+Sepolia is the primary blockchain target for real-mode integration. Keep
+MongoDB Atlas in `backend/.env`, set `ETHEREUM_RPC_URL`,
+`CONTRACT_ADDRESS`, and `EXPECTED_CHAIN_ID=11155111` for backend blockchain
+verification, and set the matching frontend contract address in
+`frontend/blockchain-config.js`.
+
+Use the Windows Sepolia launcher after a PC restart:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-kryptovault.ps1
+```
+
+The launcher verifies `frontend/`, `backend/`, and `blockchain/`, checks
+`backend/.env`, verifies the configured Sepolia RPC returns chain ID
+`11155111`, verifies deployed bytecode exists at `CONTRACT_ADDRESS`, restarts
+the KryptoVault backend on `http://localhost:4000` so the current environment
+is loaded, waits for `http://localhost:4000/api/health` and Atlas-backed
+readiness at `http://localhost:4000/api/ready`, and starts or reuses the
+frontend on `http://localhost:8000`.
+
+You can also run the same workflow through npm from the repository root:
+
+```bash
+npm run dev:all
+```
+
+Manual backend startup:
 
 ```bash
 cd backend
@@ -27,7 +53,7 @@ npm install
 npm run dev
 ```
 
-Start the frontend in a second terminal:
+Manual frontend startup:
 
 ```bash
 cd frontend
@@ -41,9 +67,9 @@ Expected backend checks:
 - `http://localhost:4000/api/health`
 - `http://localhost:4000/api/ready`
 
-For local integration, keep `backend/.env` set to `PORT=4000`,
-`CORS_ORIGIN=http://localhost:8000`, and the existing MongoDB Atlas
-`MONGODB_URI`.
+For Sepolia integration, keep `backend/.env` set to `PORT=4000`,
+`CORS_ORIGIN=http://localhost:8000`, the existing MongoDB Atlas `MONGODB_URI`,
+`ETHEREUM_RPC_URL`, `CONTRACT_ADDRESS`, and `EXPECTED_CHAIN_ID=11155111`.
 
 ## Security Rules
 

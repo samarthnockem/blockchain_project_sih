@@ -1,11 +1,12 @@
 import mongoose from "mongoose";
 import request from "supertest";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildSessionCookie, clearSessionsForTests, createSession } from "../auth/session.js";
 import { createApp } from "../app.js";
 import { AccessGrantModel } from "../models/access-grant.js";
 import { AssetAuditEventModel } from "../models/asset-audit-event.js";
 import { AssetModel } from "../models/asset.js";
+import { AuditEventModel } from "../models/audit-event.js";
 import { AssetVersionModel } from "../models/asset-version.js";
 import { FolderModel } from "../models/folder.js";
 import { UserModel } from "../models/user.js";
@@ -20,6 +21,10 @@ const bobWallet = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const validSha256 = "a".repeat(64);
 const currentHash = `0x${"b".repeat(64)}`;
 const storageId = "enc_asset_11111111-1111-4111-8111-111111111111";
+
+beforeEach(() => {
+  vi.spyOn(AuditEventModel, "create").mockResolvedValue({} as never);
+});
 
 afterEach(() => {
   clearSessionsForTests();
@@ -98,6 +103,7 @@ function mockSuccessfulPersistence() {
   const versionCreateSpy = vi.spyOn(AssetVersionModel, "create").mockResolvedValue({} as never);
   const wrappedKeyCreateSpy = vi.spyOn(WrappedKeyModel, "create").mockResolvedValue({} as never);
   const auditCreateSpy = vi.spyOn(AssetAuditEventModel, "create").mockResolvedValue({} as never);
+  const productAuditCreateSpy = vi.spyOn(AuditEventModel, "create").mockResolvedValue({} as never);
 
   return {
     assetId,
@@ -105,7 +111,8 @@ function mockSuccessfulPersistence() {
     assetCreateSpy,
     versionCreateSpy,
     wrappedKeyCreateSpy,
-    auditCreateSpy
+    auditCreateSpy,
+    productAuditCreateSpy
   };
 }
 
@@ -135,6 +142,28 @@ function sortedQueryResult<T>(value: T) {
   };
 }
 
+function eventQueryResult<T>(value: T) {
+  return {
+    sort: vi.fn().mockReturnValue({
+      limit: vi.fn().mockReturnValue({
+        select: vi.fn().mockReturnValue({
+          lean: vi.fn().mockResolvedValue(value)
+        })
+      })
+    })
+  };
+}
+
+function sortedSingleQueryResult<T>(value: T) {
+  return {
+    sort: vi.fn().mockReturnValue({
+      select: vi.fn().mockReturnValue({
+        lean: vi.fn().mockResolvedValue(value)
+      })
+    })
+  };
+}
+
 function mockBlockchainPermission(permission: "NONE" | "READ" | "WRITE", currentVersion = 2) {
   return vi.spyOn(blockchainRead, "createBlockchainReadService").mockReturnValue({
     getAssetOwner: vi.fn().mockResolvedValue(ownerWallet),
@@ -142,7 +171,8 @@ function mockBlockchainPermission(permission: "NONE" | "READ" | "WRITE", current
     getCurrentHash: vi.fn().mockResolvedValue(currentHash),
     getCurrentVersion: vi.fn().mockResolvedValue(currentVersion),
     verifyAssetRegistration: vi.fn(),
-    verifyAccessGrant: vi.fn()
+    verifyAccessGrant: vi.fn(),
+    verifyAccessRevoke: vi.fn()
   });
 }
 
@@ -200,13 +230,15 @@ function mockOpenRoutePersistence(options: {
     byteLength: Buffer.from("encrypted-bytes").byteLength,
     encryptedBytes: Buffer.from("encrypted-bytes")
   });
+  const productAuditCreateSpy = vi.spyOn(AuditEventModel, "create").mockResolvedValue({} as never);
 
   return {
     assetId,
     assetFindSpy,
     versionFindSpy,
     wrappedKeyFindSpy,
-    encryptedAssetSpy
+    encryptedAssetSpy,
+    productAuditCreateSpy
   };
 }
 
@@ -1140,6 +1172,506 @@ describe("asset access grant sync route", () => {
   });
 });
 
+describe("asset access revoke sync route", () => {
+  const blockchainAssetId = "100";
+  const revokeTxHash = `0x${"d".repeat(64)}`;
+  const grantTxHash = `0x${"e".repeat(64)}`;
+  const granteeWallet = aliceWallet;
+
+  function registeredAsset(assetId = new mongoose.Types.ObjectId(), overrides: Record<string, unknown> = {}) {
+    return {
+      _id: assetId,
+      ownerWallet,
+      filename: "vault-document.pdf.enc",
+      status: "ACTIVE",
+      blockchainAssetId,
+      blockchainVerificationStatus: "verified",
+      ...overrides
+    };
+  }
+
+  function validRevokeBody(overrides: Record<string, unknown> = {}) {
+    return {
+      granteeWallet,
+      blockchainTransactionHash: revokeTxHash,
+      ...overrides
+    };
+  }
+
+  it("requires authentication", async () => {
+    const assetFindSpy = vi.spyOn(AssetModel, "findOne");
+
+    await request(createApp())
+      .post(`/api/assets/${new mongoose.Types.ObjectId().toString()}/access/revoke-sync`)
+      .send(validRevokeBody())
+      .expect(401);
+
+    expect(assetFindSpy).not.toHaveBeenCalled();
+  });
+
+  it("verifies owner, AccessRevoked event, NONE permission, then revokes grants and deactivates wrapped keys", async () => {
+    const assetId = new mongoose.Types.ObjectId();
+    vi.spyOn(AssetModel, "findOne").mockReturnValue(queryResult(registeredAsset(assetId)) as never);
+    vi.spyOn(AccessGrantModel, "findOne").mockReturnValue(queryResult(null) as never);
+    vi.spyOn(AuditEventModel, "findOne").mockReturnValue(queryResult(null) as never);
+    const grantUpdateSpy = vi.spyOn(AccessGrantModel, "updateMany").mockResolvedValue({ modifiedCount: 1 } as never);
+    const wrappedKeyUpdateSpy = vi.spyOn(WrappedKeyModel, "updateMany").mockResolvedValue({ modifiedCount: 1 } as never);
+    const assetAuditCreateSpy = vi.spyOn(AssetAuditEventModel, "create").mockResolvedValue({} as never);
+    const verifyAccessRevokeSpy = vi.fn().mockResolvedValue({
+      blockchainAssetId,
+      transactionHash: revokeTxHash,
+      blockNumber: 45,
+      ownerWallet,
+      granteeWallet
+    });
+    const getPermissionSpy = vi.fn().mockResolvedValue("NONE");
+    vi.spyOn(blockchainRead, "createBlockchainReadService").mockReturnValue({
+      getAssetOwner: vi.fn().mockResolvedValue(ownerWallet),
+      getPermission: getPermissionSpy,
+      getCurrentHash: vi.fn(),
+      getCurrentVersion: vi.fn(),
+      verifyAssetRegistration: vi.fn(),
+      verifyAccessGrant: vi.fn(),
+      verifyAccessRevoke: verifyAccessRevokeSpy
+    });
+
+    const response = await request(createApp())
+      .post(`/api/assets/${assetId.toString()}/access/revoke-sync`)
+      .set("Cookie", authenticatedCookie())
+      .send(validRevokeBody())
+      .expect(200);
+
+    expect(verifyAccessRevokeSpy).toHaveBeenCalledWith({
+      transactionHash: revokeTxHash,
+      blockchainAssetId,
+      expectedOwnerWallet: ownerWallet,
+      expectedGranteeWallet: granteeWallet
+    });
+    expect(getPermissionSpy).toHaveBeenCalledWith(blockchainAssetId, granteeWallet);
+    expect(grantUpdateSpy).toHaveBeenCalledWith(
+      {
+        assetId,
+        ownerWallet,
+        granteeWallet,
+        status: "ACTIVE"
+      },
+      {
+        $set: {
+          status: "REVOKED",
+          revokedAt: expect.any(Date)
+        }
+      }
+    );
+    expect(wrappedKeyUpdateSpy).toHaveBeenCalledWith(
+      {
+        assetId,
+        userWallet: granteeWallet,
+        active: true
+      },
+      {
+        $set: {
+          active: false
+        }
+      }
+    );
+    expect(assetAuditCreateSpy).toHaveBeenCalledWith({
+      assetId,
+      ownerWallet,
+      actorWallet: ownerWallet,
+      eventType: "ASSET_ACCESS_REVOKED",
+      fromFolderId: null,
+      toFolderId: null
+    });
+    expect(AuditEventModel.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        walletAddress: ownerWallet,
+        assetId,
+        action: "ACCESS_REVOKED",
+        blockchainTxHash: revokeTxHash
+      })
+    );
+    expect(response.body.revokedAccess).toMatchObject({
+      assetId: assetId.toString(),
+      ownerWallet,
+      granteeWallet,
+      blockchainTxHash: revokeTxHash,
+      blockNumber: 45,
+      status: "REVOKED"
+    });
+  });
+
+  it("rejects revoke transaction replay before blockchain verification or persistence updates", async () => {
+    const assetId = new mongoose.Types.ObjectId();
+    vi.spyOn(AssetModel, "findOne").mockReturnValue(queryResult(registeredAsset(assetId)) as never);
+    vi.spyOn(AccessGrantModel, "findOne").mockReturnValueOnce(queryResult(null) as never);
+    vi.spyOn(AuditEventModel, "findOne").mockReturnValue(queryResult({ _id: new mongoose.Types.ObjectId() }) as never);
+    const blockchainSpy = vi.spyOn(blockchainRead, "createBlockchainReadService");
+    const wrappedKeyUpdateSpy = vi.spyOn(WrappedKeyModel, "updateMany");
+
+    const response = await request(createApp())
+      .post(`/api/assets/${assetId.toString()}/access/revoke-sync`)
+      .set("Cookie", authenticatedCookie())
+      .send(validRevokeBody())
+      .expect(409);
+
+    expect(response.body.error.code).toBe("BLOCKCHAIN_TRANSACTION_ALREADY_USED");
+    expect(blockchainSpy).not.toHaveBeenCalled();
+    expect(wrappedKeyUpdateSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects if the grantee permission is not NONE after the revoke transaction", async () => {
+    const assetId = new mongoose.Types.ObjectId();
+    vi.spyOn(AssetModel, "findOne").mockReturnValue(queryResult(registeredAsset(assetId)) as never);
+    vi.spyOn(AccessGrantModel, "findOne").mockReturnValue(queryResult(null) as never);
+    vi.spyOn(AuditEventModel, "findOne").mockReturnValue(queryResult(null) as never);
+    vi.spyOn(blockchainRead, "createBlockchainReadService").mockReturnValue({
+      getAssetOwner: vi.fn().mockResolvedValue(ownerWallet),
+      getPermission: vi.fn().mockResolvedValue("READ"),
+      getCurrentHash: vi.fn(),
+      getCurrentVersion: vi.fn(),
+      verifyAssetRegistration: vi.fn(),
+      verifyAccessGrant: vi.fn(),
+      verifyAccessRevoke: vi.fn().mockResolvedValue({
+        blockchainAssetId,
+        transactionHash: revokeTxHash,
+        blockNumber: 45,
+        ownerWallet,
+        granteeWallet
+      })
+    });
+    const grantUpdateSpy = vi.spyOn(AccessGrantModel, "updateMany");
+    const wrappedKeyUpdateSpy = vi.spyOn(WrappedKeyModel, "updateMany");
+
+    const response = await request(createApp())
+      .post(`/api/assets/${assetId.toString()}/access/revoke-sync`)
+      .set("Cookie", authenticatedCookie())
+      .send(validRevokeBody())
+      .expect(400);
+
+    expect(response.body.error.code).toBe("BLOCKCHAIN_VERIFICATION_FAILED");
+    expect(grantUpdateSpy).not.toHaveBeenCalled();
+    expect(wrappedKeyUpdateSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects grant transaction hashes as revoke replay", async () => {
+    const assetId = new mongoose.Types.ObjectId();
+    vi.spyOn(AssetModel, "findOne").mockReturnValue(queryResult(registeredAsset(assetId)) as never);
+    vi.spyOn(AccessGrantModel, "findOne").mockReturnValue(queryResult({ _id: new mongoose.Types.ObjectId(), blockchainTxHash: grantTxHash }) as never);
+    vi.spyOn(AuditEventModel, "findOne").mockReturnValue(queryResult(null) as never);
+    const blockchainSpy = vi.spyOn(blockchainRead, "createBlockchainReadService");
+
+    const response = await request(createApp())
+      .post(`/api/assets/${assetId.toString()}/access/revoke-sync`)
+      .set("Cookie", authenticatedCookie())
+      .send(validRevokeBody({ blockchainTransactionHash: grantTxHash }))
+      .expect(409);
+
+    expect(response.body.error.code).toBe("BLOCKCHAIN_TRANSACTION_ALREADY_USED");
+    expect(blockchainSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("asset strong revoke current-version rotation routes", () => {
+  const blockchainAssetId = "100";
+  const revokedWallet = aliceWallet;
+  const remainingWallet = bobWallet;
+  const versionTxHash = `0x${"9".repeat(64)}`;
+  const nextSha256 = "c".repeat(64);
+
+  function registeredAsset(assetId = new mongoose.Types.ObjectId(), overrides: Record<string, unknown> = {}) {
+    return {
+      _id: assetId,
+      ownerWallet,
+      filename: "vault-document.pdf.enc",
+      size: 2048,
+      mimeType: "application/pdf",
+      sha256: "b".repeat(64),
+      currentVersion: 2,
+      status: "ACTIVE",
+      blockchainAssetId,
+      blockchainVerificationStatus: "verified",
+      passwordProtectionEnabled: false,
+      ...overrides
+    };
+  }
+
+  function activeGrant(wallet: string, accessType: "READ" | "WRITE" = "READ") {
+    return {
+      granteeWallet: wallet,
+      accessType,
+      status: "ACTIVE",
+      validUntil: null
+    };
+  }
+
+  function strongFinalizeRequest(assetId: mongoose.Types.ObjectId, wrappedKeys: unknown[]) {
+    return request(createApp())
+      .post(`/api/assets/${assetId.toString()}/access/strong-revoke/finalize`)
+      .set("Cookie", authenticatedCookie())
+      .field("expectedPreviousVersion", "2")
+      .field("newVersion", "3")
+      .field("sha256", nextSha256)
+      .field(
+        "encryptionMetadata",
+        JSON.stringify({
+          algorithm: "AES-256-GCM",
+          iv: "rotated-iv",
+          tag: "included-in-ciphertext"
+        })
+      )
+      .field("wrappedKeys", JSON.stringify(wrappedKeys))
+      .field("blockchainTransactionHash", versionTxHash)
+      .attach("encryptedFile", Buffer.from("x"), {
+        filename: "vault-document.pdf.enc",
+        contentType: "application/octet-stream"
+      });
+  }
+
+  it("prepares recipients from currently authorized wallets and excludes the revoked grantee", async () => {
+    const assetId = new mongoose.Types.ObjectId();
+    vi.spyOn(AssetModel, "findOne").mockReturnValue(queryResult(registeredAsset(assetId)) as never);
+    vi.spyOn(AccessGrantModel, "find").mockReturnValue(queryResult([activeGrant(remainingWallet)]) as never);
+    vi.spyOn(UserModel, "find").mockReturnValue(
+      queryResult([
+        {
+          walletAddress: ownerWallet,
+          publicEncryptionKey: "owner-public-key"
+        },
+        {
+          walletAddress: remainingWallet,
+          publicEncryptionKey: "remaining-public-key"
+        }
+      ]) as never
+    );
+    vi.spyOn(blockchainRead, "createBlockchainReadService").mockReturnValue({
+      getAssetOwner: vi.fn().mockResolvedValue(ownerWallet),
+      getPermission: vi.fn((_: string, wallet: string) =>
+        wallet.toLowerCase() === revokedWallet ? Promise.resolve("NONE") : Promise.resolve("READ")
+      ),
+      getCurrentHash: vi.fn().mockResolvedValue(`0x${"b".repeat(64)}`),
+      getCurrentVersion: vi.fn().mockResolvedValue(2),
+      verifyAssetRegistration: vi.fn(),
+      verifyAccessGrant: vi.fn(),
+      verifyAccessRevoke: vi.fn(),
+      verifyVersionCommit: vi.fn()
+    });
+
+    const response = await request(createApp())
+      .post(`/api/assets/${assetId.toString()}/access/strong-revoke/prepare`)
+      .set("Cookie", authenticatedCookie())
+      .send({ granteeWallet: revokedWallet })
+      .expect(200);
+
+    expect(response.body.strongRevoke).toMatchObject({
+      assetId: assetId.toString(),
+      currentVersion: 2,
+      nextVersion: 3,
+      expectedSha256: "b".repeat(64),
+      revokedGranteeWallet: revokedWallet
+    });
+    expect(response.body.strongRevoke.recipients).toEqual([
+      {
+        walletAddress: ownerWallet,
+        publicEncryptionKey: "owner-public-key",
+        requiresPasswordWrapping: false
+      },
+      {
+        walletAddress: remainingWallet,
+        publicEncryptionKey: "remaining-public-key",
+        requiresPasswordWrapping: false
+      }
+    ]);
+  });
+
+  it("finalizes strong revoke by preserving old history, creating current version, and issuing K2 only to authorized users", async () => {
+    const assetId = new mongoose.Types.ObjectId();
+    vi.spyOn(AssetModel, "findOne").mockReturnValue(queryResult(registeredAsset(assetId)) as never);
+    vi.spyOn(AssetVersionModel, "findOne").mockReturnValue(queryResult(null) as never);
+    vi.spyOn(AuditEventModel, "findOne").mockReturnValue(queryResult(null) as never);
+    vi.spyOn(AccessGrantModel, "find").mockReturnValue(queryResult([activeGrant(remainingWallet)]) as never);
+    const storeSpy = vi.spyOn(encryptedAssetStorage, "storeEncryptedAsset").mockResolvedValue({
+      storageId,
+      byteLength: 18,
+      originalFilename: "vault-document.pdf.enc"
+    });
+    const versionCreateSpy = vi.spyOn(AssetVersionModel, "create").mockResolvedValue({} as never);
+    const wrappedKeyUpdateSpy = vi.spyOn(WrappedKeyModel, "updateMany").mockResolvedValue({ modifiedCount: 2 } as never);
+    const wrappedKeyCreateSpy = vi.spyOn(WrappedKeyModel, "create").mockResolvedValue([] as never);
+    const assetUpdateSpy = vi.spyOn(AssetModel, "findOneAndUpdate").mockResolvedValue({} as never);
+    vi.spyOn(AssetAuditEventModel, "create").mockResolvedValue({} as never);
+    const verifyVersionCommitSpy = vi.fn().mockResolvedValue({
+      blockchainAssetId,
+      transactionHash: versionTxHash,
+      blockNumber: 99,
+      committerWallet: ownerWallet,
+      sha256: nextSha256,
+      version: 3
+    });
+    vi.spyOn(blockchainRead, "createBlockchainReadService").mockReturnValue({
+      getAssetOwner: vi.fn().mockResolvedValue(ownerWallet),
+      getPermission: vi.fn((_: string, wallet: string) =>
+        wallet.toLowerCase() === remainingWallet ? Promise.resolve("READ") : Promise.resolve("NONE")
+      ),
+      getCurrentHash: vi.fn(),
+      getCurrentVersion: vi.fn(),
+      verifyAssetRegistration: vi.fn(),
+      verifyAccessGrant: vi.fn(),
+      verifyAccessRevoke: vi.fn(),
+      verifyVersionCommit: verifyVersionCommitSpy
+    });
+
+    const response = await strongFinalizeRequest(assetId, [
+      {
+        walletAddress: ownerWallet,
+        wrappedAESKey: "wrapped-k2-owner",
+        wrappingMetadata: {
+          algorithm: "RSA-OAEP",
+          keyId: "owner-key"
+        }
+      },
+      {
+        walletAddress: remainingWallet,
+        wrappedAESKey: "wrapped-k2-remaining",
+        wrappingMetadata: {
+          algorithm: "RSA-OAEP",
+          keyId: "remaining-key"
+        }
+      }
+    ]).expect(200);
+
+    expect(verifyVersionCommitSpy).toHaveBeenCalledWith({
+      transactionHash: versionTxHash,
+      blockchainAssetId,
+      expectedCommitterWallet: ownerWallet,
+      expectedSha256: nextSha256,
+      expectedVersion: 3
+    });
+    expect(storeSpy).toHaveBeenCalledWith({
+      encryptedBytes: Buffer.from("x"),
+      originalFilename: "vault-document.pdf.enc"
+    });
+    expect(versionCreateSpy).toHaveBeenCalledWith({
+      assetId,
+      version: 3,
+      encryptedStorageReference: storageId,
+      encryptionMetadata: {
+        algorithm: "AES-256-GCM",
+        iv: "rotated-iv",
+        tag: "included-in-ciphertext"
+      },
+      sha256: nextSha256,
+      createdBy: ownerWallet,
+      commitMessage: "Strong revocation key rotation",
+      blockchainTransactionHash: versionTxHash
+    });
+    expect(wrappedKeyUpdateSpy).toHaveBeenCalledWith(
+      {
+        assetId,
+        version: 2,
+        active: true
+      },
+      {
+        $set: {
+          active: false
+        }
+      },
+      undefined
+    );
+    expect(wrappedKeyCreateSpy).toHaveBeenCalledWith([
+      expect.objectContaining({
+        userWallet: ownerWallet,
+        wrappedAESKey: "wrapped-k2-owner",
+        version: 3,
+        active: true
+      }),
+      expect.objectContaining({
+        userWallet: remainingWallet,
+        wrappedAESKey: "wrapped-k2-remaining",
+        version: 3,
+        active: true
+      })
+    ]);
+    expect(JSON.stringify(wrappedKeyCreateSpy.mock.calls)).not.toContain(revokedWallet);
+    expect(assetUpdateSpy).toHaveBeenCalledWith(
+      {
+        _id: assetId,
+        ownerWallet,
+        currentVersion: 2
+      },
+      {
+        $set: {
+          currentVersion: 3,
+          sha256: nextSha256,
+          status: "ACTIVE",
+          blockchainVerificationStatus: "verified"
+        }
+      },
+      {
+        new: true,
+        runValidators: true
+      }
+    );
+    expect(response.body.version).toMatchObject({
+      assetId: assetId.toString(),
+      version: 3,
+      sha256: nextSha256,
+      blockchainTxHash: versionTxHash,
+      blockNumber: 99,
+      wrappedKeyRecipients: [ownerWallet, remainingWallet]
+    });
+  });
+
+  it("rejects finalization when wrapped-key recipients include the revoked user or omit a remaining user", async () => {
+    const assetId = new mongoose.Types.ObjectId();
+    vi.spyOn(AssetModel, "findOne").mockReturnValue(queryResult(registeredAsset(assetId)) as never);
+    vi.spyOn(AssetVersionModel, "findOne").mockReturnValue(queryResult(null) as never);
+    vi.spyOn(AuditEventModel, "findOne").mockReturnValue(queryResult(null) as never);
+    vi.spyOn(AccessGrantModel, "find").mockReturnValue(queryResult([activeGrant(remainingWallet)]) as never);
+    vi.spyOn(blockchainRead, "createBlockchainReadService").mockReturnValue({
+      getAssetOwner: vi.fn().mockResolvedValue(ownerWallet),
+      getPermission: vi.fn((_: string, wallet: string) =>
+        wallet.toLowerCase() === remainingWallet ? Promise.resolve("READ") : Promise.resolve("NONE")
+      ),
+      getCurrentHash: vi.fn(),
+      getCurrentVersion: vi.fn(),
+      verifyAssetRegistration: vi.fn(),
+      verifyAccessGrant: vi.fn(),
+      verifyAccessRevoke: vi.fn(),
+      verifyVersionCommit: vi.fn().mockResolvedValue({
+        blockchainAssetId,
+        transactionHash: versionTxHash,
+        blockNumber: 99,
+        committerWallet: ownerWallet,
+        sha256: nextSha256,
+        version: 3
+      })
+    });
+    const storeSpy = vi.spyOn(encryptedAssetStorage, "storeEncryptedAsset");
+
+    const response = await strongFinalizeRequest(assetId, [
+      {
+        walletAddress: ownerWallet,
+        wrappedAESKey: "wrapped-k2-owner",
+        wrappingMetadata: {
+          algorithm: "RSA-OAEP",
+          keyId: "owner-key"
+        }
+      },
+      {
+        walletAddress: revokedWallet,
+        wrappedAESKey: "wrapped-k2-revoked",
+        wrappingMetadata: {
+          algorithm: "RSA-OAEP",
+          keyId: "revoked-key"
+        }
+      }
+    ]).expect(400);
+
+    expect(response.body.error.code).toBe("WRAPPED_KEY_RECIPIENTS_MISMATCH");
+    expect(storeSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("asset access management route", () => {
   const blockchainAssetId = "100";
   const readGrantTxHash = `0x${"e".repeat(64)}`;
@@ -1875,6 +2407,8 @@ describe("asset blockchain detail route", () => {
         })
       ) as never
     );
+    vi.spyOn(AuditEventModel, "findOne").mockReturnValue(sortedSingleQueryResult(null) as never);
+    vi.spyOn(AssetVersionModel, "findOne").mockReturnValue(sortedSingleQueryResult(null) as never);
     const blockchainSpy = vi.spyOn(blockchainRead, "createBlockchainReadService");
 
     const response = await request(createApp())
@@ -1895,6 +2429,18 @@ describe("asset blockchain detail route", () => {
       blockNumber: null,
       status: "PENDING_BLOCKCHAIN",
       blockchainVerificationStatus: "pending",
+      confirmationState: "PENDING",
+      registration: {
+        transactionHash: null,
+        blockNumber: null,
+        confirmed: false
+      },
+      current: {
+        ownerWallet,
+        hash: `0x${validSha256}`,
+        version: 1
+      },
+      latestKnownTransaction: null,
       createdAt: "2026-09-08T00:00:00.000Z",
       updatedAt: "2026-09-08T01:00:00.000Z"
     });
@@ -1903,6 +2449,15 @@ describe("asset blockchain detail route", () => {
   it("returns verified blockchain detail for an authorized reader", async () => {
     const assetId = new mongoose.Types.ObjectId();
     vi.spyOn(AssetModel, "findOne").mockReturnValue(queryResult(blockchainAsset(assetId)) as never);
+    vi.spyOn(AuditEventModel, "findOne").mockReturnValue(
+      sortedSingleQueryResult({
+        action: "ACCESS_REVOKED",
+        detail: "vault-document.pdf.enc access revoked",
+        blockchainTxHash: `0x${"d".repeat(64)}`,
+        timestamp: new Date("2026-09-10T01:00:00.000Z")
+      }) as never
+    );
+    vi.spyOn(AssetVersionModel, "findOne").mockReturnValue(sortedSingleQueryResult(null) as never);
     const blockchain = mockBlockchainPermission("READ", 1);
 
     const response = await request(createApp())
@@ -1919,7 +2474,24 @@ describe("asset blockchain detail route", () => {
       registrationTxHash: `0x${"c".repeat(64)}`,
       blockNumber: 7,
       status: "BLOCKCHAIN_MISMATCH",
-      blockchainVerificationStatus: "failed"
+      blockchainVerificationStatus: "failed",
+      confirmationState: "MISMATCH",
+      registration: {
+        transactionHash: `0x${"c".repeat(64)}`,
+        blockNumber: 7,
+        confirmed: true
+      },
+      current: {
+        ownerWallet,
+        hash: currentHash,
+        version: 1
+      },
+      latestKnownTransaction: {
+        action: "ACCESS_REVOKED",
+        detail: "vault-document.pdf.enc access revoked",
+        blockchainTxHash: `0x${"d".repeat(64)}`,
+        timestamp: "2026-09-10T01:00:00.000Z"
+      }
     });
   });
 
@@ -1946,6 +2518,127 @@ describe("asset blockchain detail route", () => {
 });
 
 describe("encrypted asset open route", () => {
+  describe("integrity metadata", () => {
+    it("returns integrity metadata for an authenticated wallet with READ permission", async () => {
+      const blockchainSpy = mockBlockchainPermission("READ");
+      const { assetId, encryptedAssetSpy, wrappedKeyFindSpy } = mockOpenRoutePersistence();
+
+      const response = await request(createApp())
+        .get(`/api/assets/${assetId.toString()}/integrity`)
+        .set("Cookie", authenticatedCookie(aliceWallet))
+        .expect(200);
+
+      expect(response.body).toEqual({
+        integrity: {
+          currentVersion: 2,
+          expectedSha256: "b".repeat(64),
+          blockchainSha256: "b".repeat(64),
+          blockchainVerificationStatus: "verified"
+        }
+      });
+      expect(blockchainSpy.mock.results[0].value.getPermission).toHaveBeenCalledWith("123", aliceWallet);
+      expect(wrappedKeyFindSpy).not.toHaveBeenCalled();
+      expect(encryptedAssetSpy).not.toHaveBeenCalled();
+      expect(JSON.stringify(response.body)).not.toContain("wrapped-key-for-current-user");
+      expect(JSON.stringify(response.body)).not.toContain("encrypted-bytes");
+    });
+
+    it("returns integrity metadata for an authenticated wallet with WRITE permission", async () => {
+      mockBlockchainPermission("WRITE");
+      const { assetId } = mockOpenRoutePersistence();
+
+      const response = await request(createApp())
+        .get(`/api/assets/${assetId.toString()}/integrity`)
+        .set("Cookie", authenticatedCookie(aliceWallet))
+        .expect(200);
+
+      expect(response.body.integrity.blockchainVerificationStatus).toBe("verified");
+    });
+
+    it("returns integrity metadata for the authenticated owner", async () => {
+      const blockchainSpy = mockBlockchainPermission("WRITE");
+      const { assetId } = mockOpenRoutePersistence();
+
+      const response = await request(createApp())
+        .get(`/api/assets/${assetId.toString()}/integrity`)
+        .set("Cookie", authenticatedCookie(ownerWallet))
+        .expect(200);
+
+      expect(blockchainSpy.mock.results[0].value.getPermission).toHaveBeenCalledWith("123", ownerWallet);
+      expect(response.body.integrity.expectedSha256).toBe("b".repeat(64));
+    });
+
+    it("denies integrity metadata when blockchain permission is NONE", async () => {
+      mockBlockchainPermission("NONE");
+      const { assetId, versionFindSpy, wrappedKeyFindSpy, encryptedAssetSpy } = mockOpenRoutePersistence();
+
+      const response = await request(createApp())
+        .get(`/api/assets/${assetId.toString()}/integrity`)
+        .set("Cookie", authenticatedCookie(aliceWallet))
+        .expect(403);
+
+      expect(response.body.error.code).toBe("ASSET_ACCESS_DENIED");
+      expect(versionFindSpy).not.toHaveBeenCalled();
+      expect(wrappedKeyFindSpy).not.toHaveBeenCalled();
+      expect(encryptedAssetSpy).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when blockchain hash does not match a stored asset version", async () => {
+      mockBlockchainPermission("READ");
+      const { assetId, wrappedKeyFindSpy, encryptedAssetSpy } = mockOpenRoutePersistence();
+      vi.spyOn(AssetVersionModel, "findOne").mockRestore();
+      vi.spyOn(AssetVersionModel, "findOne").mockReturnValue(queryResult(null) as never);
+
+      const response = await request(createApp())
+        .get(`/api/assets/${assetId.toString()}/integrity`)
+        .set("Cookie", authenticatedCookie(aliceWallet))
+        .expect(403);
+
+      expect(response.body.error.code).toBe("ASSET_ACCESS_DENIED");
+      expect(wrappedKeyFindSpy).not.toHaveBeenCalled();
+      expect(encryptedAssetSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns asset activity only after blockchain-backed access verification", async () => {
+      mockBlockchainPermission("READ");
+      const { assetId, wrappedKeyFindSpy, encryptedAssetSpy } = mockOpenRoutePersistence();
+      vi.spyOn(AuditEventModel, "find").mockReturnValue(
+        eventQueryResult([
+          {
+            _id: new mongoose.Types.ObjectId(),
+            walletAddress: ownerWallet,
+            assetId,
+            action: "BLOCKCHAIN_REGISTERED",
+            detail: "vault-document.pdf.enc registered on-chain",
+            blockchainTxHash: `0x${"c".repeat(64)}`,
+            timestamp: new Date("2026-09-10T01:00:00.000Z")
+          }
+        ]) as never
+      );
+
+      const response = await request(createApp())
+        .get(`/api/assets/${assetId.toString()}/activity`)
+        .set("Cookie", authenticatedCookie(aliceWallet))
+        .expect(200);
+
+      expect(response.body.activity).toEqual([
+        {
+          id: expect.any(String),
+          walletAddress: ownerWallet,
+          assetId: assetId.toString(),
+          action: "BLOCKCHAIN_REGISTERED",
+          detail: "vault-document.pdf.enc registered on-chain",
+          blockchainTxHash: `0x${"c".repeat(64)}`,
+          timestamp: "2026-09-10T01:00:00.000Z"
+        }
+      ]);
+      expect(wrappedKeyFindSpy).not.toHaveBeenCalled();
+      expect(encryptedAssetSpy).not.toHaveBeenCalled();
+      expect(JSON.stringify(response.body)).not.toContain("wrapped-key-for-current-user");
+      expect(JSON.stringify(response.body)).not.toContain("encrypted-bytes");
+    });
+  });
+
   it("denies Alice attempting to open a Bob-only asset", async () => {
     mockBlockchainPermission("READ");
     const { assetId, wrappedKeyFindSpy, encryptedAssetSpy } = mockOpenRoutePersistence({
@@ -1994,9 +2687,9 @@ describe("encrypted asset open route", () => {
     expect(wrappedKeyFindSpy).not.toHaveBeenCalled();
   });
 
-  it("denies NONE permission", async () => {
+  it("returns 403 from /open after revoked user permission resolves to NONE", async () => {
     mockBlockchainPermission("NONE");
-    const { assetId } = mockOpenRoutePersistence();
+    const { assetId, wrappedKeyFindSpy, encryptedAssetSpy } = mockOpenRoutePersistence();
 
     const response = await request(createApp())
       .get(`/api/assets/${assetId.toString()}/open`)
@@ -2007,6 +2700,8 @@ describe("encrypted asset open route", () => {
       code: "ASSET_ACCESS_DENIED",
       message: "Asset access denied"
     });
+    expect(wrappedKeyFindSpy).not.toHaveBeenCalled();
+    expect(encryptedAssetSpy).not.toHaveBeenCalled();
   });
 
   it("opens an encrypted asset with READ permission", async () => {
@@ -2056,6 +2751,34 @@ describe("encrypted asset open route", () => {
 
     expect(response.body.asset.permission).toBe("WRITE");
     expect(response.body.asset.EK_User).toBe("wrapped-key-for-current-user");
+  });
+
+  it("opens the current rotated version with the current K2 wrapped key", async () => {
+    const blockchainSpy = mockBlockchainPermission("READ", 3);
+    const { assetId, versionFindSpy, wrappedKeyFindSpy } = mockOpenRoutePersistence({
+      currentVersion: 3,
+      wrappedKey: "wrapped-k2-for-current-user"
+    });
+
+    const response = await request(createApp())
+      .get(`/api/assets/${assetId.toString()}/open`)
+      .set("Cookie", authenticatedCookie(aliceWallet))
+      .expect(200);
+
+    expect(versionFindSpy).toHaveBeenCalledWith({
+      assetId,
+      version: 3,
+      sha256: "b".repeat(64)
+    });
+    expect(wrappedKeyFindSpy).toHaveBeenCalledWith({
+      assetId,
+      userWallet: aliceWallet,
+      version: 3,
+      active: true
+    });
+    expect(blockchainSpy.mock.results[0].value.getPermission).toHaveBeenCalledWith("123", aliceWallet);
+    expect(response.body.asset.currentVersion).toBe(3);
+    expect(response.body.asset.EK_User).toBe("wrapped-k2-for-current-user");
   });
 
   it("denies access when the authenticated wallet has no wrapped key", async () => {

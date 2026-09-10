@@ -10,10 +10,37 @@ npm run compile
 npm test
 ```
 
+## Sepolia Setup
+
+Sepolia is the real-mode blockchain target. Create `blockchain/.env` from
+`blockchain/.env.example` and provide:
+
+```bash
+SEPOLIA_RPC_URL=<your Sepolia RPC URL>
+DEPLOYER_PRIVATE_KEY=<funded Sepolia deployer private key>
+```
+
+Do not commit `blockchain/.env`.
+
+Deploy to Sepolia with:
+
+```bash
+npm run deploy:sepolia
+```
+
+The deployment writes:
+
+- `exports/KryptoVaultAccess.sepolia.json` - contract address, chain ID, and ABI
+- `exports/KryptoVaultAccess.abi.json` - ABI only
+- `exports/sepolia.env.example` - backend-style values with placeholders
+
+Copy the Sepolia contract address into backend and frontend configuration. The
+backend must use `EXPECTED_CHAIN_ID=11155111`.
+
 ## Local Demo Setup
 
-Use only the Hardhat local network for this flow. The accounts and ETH are
-test-only and have no real value.
+Use the Hardhat local network only as an optional development fallback. The
+accounts and ETH are test-only and have no real value.
 
 Terminal 1:
 

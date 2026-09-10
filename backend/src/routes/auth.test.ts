@@ -4,11 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearChallengesForTests } from "../auth/challenges.js";
 import { clearSessionsForTests, sessionCookieName } from "../auth/session.js";
 import { createApp } from "../app.js";
+import { AuditEventModel } from "../models/audit-event.js";
 
 afterEach(() => {
   clearChallengesForTests();
   clearSessionsForTests();
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 async function getChallenge(app: ReturnType<typeof createApp>) {
@@ -30,6 +32,7 @@ describe("wallet authentication", () => {
     const wallet = Wallet.createRandom();
     const challenge = await getChallenge(app);
     const signature = await wallet.signMessage(challenge.message);
+    const auditCreateSpy = vi.spyOn(AuditEventModel, "create").mockResolvedValue({} as never);
 
     const response = await request(app)
       .post("/api/auth/verify")
@@ -47,6 +50,14 @@ describe("wallet authentication", () => {
     expect(response.headers["set-cookie"][0]).toContain(`${sessionCookieName}=`);
     expect(response.headers["set-cookie"][0]).toContain("HttpOnly");
     expect(response.headers["set-cookie"][0]).toContain("SameSite=Lax");
+    expect(auditCreateSpy).toHaveBeenCalledWith({
+      walletAddress: wallet.address.toLowerCase(),
+      assetId: null,
+      action: "WALLET_AUTHENTICATED",
+      detail: "Wallet authenticated",
+      blockchainTxHash: null,
+      timestamp: expect.any(Date)
+    });
 
     const me = await request(app).get("/api/auth/me").set("Cookie", response.headers["set-cookie"]).expect(200);
     expect(me.body).toEqual({
@@ -79,6 +90,7 @@ describe("wallet authentication", () => {
     const wallet = Wallet.createRandom();
     const challenge = await getChallenge(app);
     const signature = await wallet.signMessage(challenge.message);
+    vi.spyOn(AuditEventModel, "create").mockResolvedValue({} as never);
 
     await request(app).post("/api/auth/verify").send(verificationPayload(challenge, signature)).expect(200);
 
@@ -97,6 +109,7 @@ describe("wallet authentication", () => {
     const wallet = Wallet.createRandom();
     const challenge = await getChallenge(app);
     const signature = await wallet.signMessage(challenge.message);
+    vi.spyOn(AuditEventModel, "create").mockResolvedValue({} as never);
 
     vi.setSystemTime(new Date("2026-09-07T00:06:00.000Z"));
 
@@ -109,6 +122,7 @@ describe("wallet authentication", () => {
     const wallet = Wallet.createRandom();
     const challenge = await getChallenge(app);
     const signature = await wallet.signMessage(challenge.message);
+    vi.spyOn(AuditEventModel, "create").mockResolvedValue({} as never);
     const login = await request(app).post("/api/auth/verify").send(verificationPayload(challenge, signature)).expect(200);
 
     const logout = await request(app).post("/api/auth/logout").set("Cookie", login.headers["set-cookie"]).expect(200);

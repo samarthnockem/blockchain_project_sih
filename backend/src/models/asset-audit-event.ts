@@ -29,7 +29,13 @@ const assetAuditEventSchema = new Schema(
     eventType: {
       type: String,
       required: true,
-      enum: ["ASSET_UPLOADED", "ASSET_FOLDER_MOVED", "ASSET_ACCESS_GRANTED"],
+      enum: [
+        "ASSET_UPLOADED",
+        "ASSET_FOLDER_MOVED",
+        "ASSET_ACCESS_GRANTED",
+        "ASSET_ACCESS_REVOKED",
+        "ASSET_STRONG_REVOKE_COMPLETED"
+      ],
       index: true
     },
     fromFolderId: {

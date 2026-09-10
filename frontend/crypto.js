@@ -351,6 +351,16 @@
     };
   }
 
+  async function decryptBytesWithAesGcm(ciphertext, aesKey, encryptionMetadata) {
+    requireWebCrypto();
+    if (encryptionMetadata?.algorithm !== "AES-256-GCM") {
+      throw new Error("Unsupported encryption metadata.");
+    }
+
+    const iv = base64ToArrayBuffer(encryptionMetadata.iv || "");
+    return crypto.subtle.decrypt({ name: "AES-GCM", iv }, aesKey, ciphertext);
+  }
+
   async function unwrapDocumentAesKey(wrappedAESKey, walletAddress) {
     const identity = await getDocumentEncryptionIdentity(walletAddress);
     return crypto.subtle.unwrapKey(
@@ -416,6 +426,7 @@
     generatePasswordSalt,
     derivePasswordKey,
     encryptBytesWithAesGcm,
+    decryptBytesWithAesGcm,
     wrapDocumentAesKey,
     wrapDocumentAesKeyWithPassword,
     unwrapDocumentAesKey,
@@ -433,6 +444,7 @@
       normalizeWalletAddress,
       identityStoreKey,
       encryptBytesWithAesGcm,
+      decryptBytesWithAesGcm,
       wrapDocumentAesKeyWithPassword,
       unwrapPasswordWrappedDocumentAesKey,
       encryptFileWithPublicKey

@@ -108,6 +108,8 @@ let currentDocId = null;
 let pendingRevoke = null;
 let selectedUploadFile = null;
 let blockchainRecordsRequestId = 0;
+let accountStateGeneration = 0;
+let walletEventsRegistered = false;
 let toastTimer = null;
 
 function isDemoModeEnabled() {
@@ -291,8 +293,49 @@ async function loadFolders() {
 }
 
 async function loadAuditActivity() {
-  // User-facing activity endpoints are not implemented yet.
-  return [];
+  if (!window.KryptoVaultApi) return [];
+
+  try {
+    const response = await window.KryptoVaultApi.get("/api/activity");
+    return (response?.activity || []).map(normalizeAuditEvent);
+  } catch (error) {
+    if (error?.status === 401) return [];
+    toast(error?.message || "Activity could not be loaded.");
+    return [];
+  }
+}
+
+function normalizeAuditEvent(event) {
+  return {
+    id: event.id,
+    assetId: event.assetId,
+    time: event.timestamp ? new Date(event.timestamp).getTime() : Date.now(),
+    action: String(event.action || "").replaceAll("_", " "),
+    detail: event.detail || "",
+    blockchainTxHash: event.blockchainTxHash || ""
+  };
+}
+
+async function loadDocumentActivity(doc, force = false) {
+  if (isDemoModeEnabled()) {
+    return state.activities.filter(a => a.detail.includes(doc.name));
+  }
+
+  if (!window.KryptoVaultApi) return [];
+  if (!force && doc.activityLoadedFor === doc.id) return doc.activity || [];
+
+  doc.activityLoading = true;
+  try {
+    const response = await window.KryptoVaultApi.get(`/api/assets/${encodeURIComponent(doc.id)}/activity`);
+    doc.activity = (response?.activity || []).map(normalizeAuditEvent);
+    doc.activityLoadedFor = doc.id;
+    return doc.activity;
+  } catch (error) {
+    doc.activityError = error?.message || "Document activity could not be loaded.";
+    return [];
+  } finally {
+    doc.activityLoading = false;
+  }
 }
 
 async function loadBlockchainRecords() {
@@ -302,6 +345,7 @@ async function loadBlockchainRecords() {
 
 async function loadBackendState() {
   if (isDemoModeEnabled()) return;
+  const generation = accountStateGeneration;
 
   const [user, folders, documents, shared, activities] = await Promise.all([
     loadAuthenticatedUser(),
@@ -310,6 +354,8 @@ async function loadBackendState() {
     loadSharedAssets(),
     loadAuditActivity()
   ]);
+
+  if (generation !== accountStateGeneration) return;
 
   state = {
     ...state,
@@ -327,12 +373,15 @@ async function refreshWorkspaceState() {
     renderAll();
     return;
   }
+  const generation = accountStateGeneration;
 
   const [folders, documents, shared] = await Promise.all([
     loadFolders(),
     loadOwnedAssets(),
     loadSharedAssets()
   ]);
+
+  if (generation !== accountStateGeneration) return;
 
   state = {
     ...state,
@@ -417,15 +466,27 @@ function normalizeBackendSharedAsset(asset) {
 }
 
 function normalizeBlockchainRecord(record) {
+  const latest = record.latestKnownTransaction || null;
+  const registration = record.registration || {};
+  const current = record.current || {};
   return {
     assetId: record.assetId || record.id || "",
     filename: record.filename || "Untitled Document",
-    ownerWallet: record.ownerWallet || "",
-    currentHash: record.currentHash || "",
-    currentVersion: record.currentVersion || "",
-    registrationTxHash: record.registrationTxHash || record.registrationTransactionHash || "",
-    blockNumber: record.blockNumber || "",
-    status: record.status || record.blockchainVerificationStatus || "pending"
+    ownerWallet: current.ownerWallet || record.ownerWallet || "",
+    currentHash: current.hash || record.currentHash || "",
+    currentVersion: current.version || record.currentVersion || "",
+    registrationTxHash: registration.transactionHash || record.registrationTxHash || record.registrationTransactionHash || "",
+    blockNumber: registration.blockNumber || record.blockNumber || "",
+    status: record.status || record.blockchainVerificationStatus || "pending",
+    confirmationState: record.confirmationState || record.blockchainVerificationStatus || record.status || "pending",
+    latestKnownTransaction: latest
+      ? {
+          action: latest.action || "",
+          detail: latest.detail || "",
+          blockchainTxHash: latest.blockchainTxHash || "",
+          timestamp: latest.timestamp || ""
+        }
+      : null
   };
 }
 
@@ -465,6 +526,56 @@ function renderBlockchainTable(records) {
 function clearAuthenticatedUser() {
   state.user = emptyUser();
   renderAll();
+}
+
+function normalizeWalletAddressForUi(walletAddress) {
+  return String(walletAddress || "").trim().toLowerCase();
+}
+
+function closeAccountScopedModals() {
+  document.querySelectorAll(".modal.open").forEach((modal) => modal.classList.remove("open"));
+}
+
+function resetAccountScopedState(message = "Guest", walletAddress = "") {
+  accountStateGeneration += 1;
+  blockchainRecordsRequestId += 1;
+  const settings = { ...state.settings };
+  state = {
+    ...emptyAppData(),
+    settings,
+    user: {
+      ...emptyUser(),
+      name: message,
+      walletAddress: normalizeWalletAddressForUi(walletAddress)
+    }
+  };
+  currentDocId = null;
+  pendingRevoke = null;
+  selectedUploadFile = null;
+  closeAccountScopedModals();
+  renderAll();
+}
+
+async function getSelectedMetaMaskAccount() {
+  if (!window.ethereum?.request) return "";
+  const accounts = await window.ethereum.request({ method: "eth_accounts" });
+  return normalizeWalletAddressForUi(accounts?.[0] || "");
+}
+
+async function assertAuthenticatedWalletMatches(expectedWallet) {
+  const expected = normalizeWalletAddressForUi(expectedWallet);
+  const [selectedWallet, backendUser] = await Promise.all([
+    getSelectedMetaMaskAccount(),
+    loadAuthenticatedUser()
+  ]);
+  const backendWallet = normalizeWalletAddressForUi(backendUser.walletAddress);
+
+  if (!expected || selectedWallet !== expected || backendWallet !== expected) {
+    throw new Error("Selected wallet and authenticated backend session do not match.");
+  }
+
+  state.user = backendUser;
+  return backendUser;
 }
 
 async function refreshAuthenticatedUser() {
@@ -510,14 +621,16 @@ async function saveUserProfile() {
   }
 }
 
-async function logoutWalletSession() {
+async function logoutWalletSession(message = "Guest", resetUi = true) {
   if (window.KryptoVaultApi) {
     try {
       await window.KryptoVaultApi.post("/api/auth/logout");
     } catch (_) {}
   }
 
-  clearAuthenticatedUser();
+  if (resetUi) {
+    resetAccountScopedState(message);
+  }
 }
 
 async function requestWalletAccount() {
@@ -561,16 +674,38 @@ async function verifySignedChallenge(challenge, signature) {
 }
 
 async function authenticateWallet(account) {
+  const generation = accountStateGeneration;
   const walletAddress = account || await requestWalletAccount();
+  const expectedWallet = normalizeWalletAddressForUi(walletAddress);
+  state.user = {
+    ...emptyUser(),
+    name: "Authenticating wallet...",
+    walletAddress: expectedWallet
+  };
+  renderAll();
+
   const challenge = await requestLoginChallenge();
   const signature = await signLoginChallenge(walletAddress, challenge);
+  if (generation !== accountStateGeneration) {
+    throw new Error("Wallet authentication was superseded by another account change.");
+  }
+  if ((await getSelectedMetaMaskAccount()) !== expectedWallet) {
+    throw new Error("MetaMask account changed while authentication was in progress.");
+  }
+
   await verifySignedChallenge(challenge, signature);
-  const user = await refreshAuthenticatedUser();
+  const user = await assertAuthenticatedWalletMatches(expectedWallet);
+  if (generation !== accountStateGeneration) {
+    throw new Error("Wallet authentication was superseded by another account change.");
+  }
   if (!window.KryptoVaultCrypto) {
     throw new Error("Document encryption identity support is not available.");
   }
   if (user.walletAddress) {
     await window.KryptoVaultCrypto.ensureDocumentEncryptionIdentityRegistered(user.walletAddress);
+  }
+  if (generation !== accountStateGeneration) {
+    throw new Error("Wallet authentication was superseded by another account change.");
   }
   addActivity("Wallet authenticated", `Verified wallet session for ${shortHash(user.walletAddress)}`);
   renderAll();
@@ -580,15 +715,18 @@ async function authenticateWallet(account) {
 async function handleWalletAccountChanged(accounts) {
   if (isDemoModeEnabled()) return;
 
-  await logoutWalletSession();
+  const nextWallet = normalizeWalletAddressForUi(accounts?.[0] || "");
+  resetAccountScopedState(nextWallet ? "Switching account..." : "Guest", nextWallet);
+  await logoutWalletSession("Switching account...", false);
 
-  if (!accounts?.[0]) {
+  if (!nextWallet) {
     toast("MetaMask account disconnected.");
     return;
   }
 
   try {
-    await authenticateWallet(accounts[0]);
+    await authenticateWallet(nextWallet);
+    await loadBackendState();
     toast("MetaMask account changed. Session re-authenticated.");
   } catch (_) {
     await logoutWalletSession();
@@ -599,15 +737,34 @@ async function handleWalletAccountChanged(accounts) {
 async function handleWalletChainChanged() {
   if (isDemoModeEnabled()) return;
 
-  await logoutWalletSession();
+  resetAccountScopedState("Network changed...");
+  await logoutWalletSession("Network changed...", false);
+  try {
+    const status = await window.KryptoVaultBlockchain?.getCurrentNetworkStatus?.();
+    if (status && !status.isExpectedChain) {
+      toast(`Network changed. Switch MetaMask to ${status.expectedChainName || "Sepolia"} and sign in again.`);
+      return;
+    }
+
+    const selectedWallet = await getSelectedMetaMaskAccount();
+    if (selectedWallet) {
+      await authenticateWallet(selectedWallet);
+      await loadBackendState();
+      toast("Network changed. Session re-authenticated.");
+      return;
+    }
+  } catch (_) {}
+
   toast("Network changed. Please sign in again.");
 }
 
 function registerWalletEvents() {
   if (!window.ethereum?.on) return;
+  if (walletEventsRegistered) return;
 
   window.ethereum.on("accountsChanged", handleWalletAccountChanged);
   window.ethereum.on("chainChanged", handleWalletChainChanged);
+  walletEventsRegistered = true;
 }
 
 window.KryptoVaultState = {
@@ -660,7 +817,7 @@ function isWrongNetworkError(error) {
 }
 
 function showNetworkSwitchAction(error) {
-  const chainName = error?.details?.expectedChainName || "Hardhat Local";
+  const chainName = error?.details?.expectedChainName || "Sepolia";
   toastAction(error?.message || `Wrong network. Switch MetaMask to ${chainName}.`, `Switch to ${chainName}`, async () => {
     try {
       await window.KryptoVaultBlockchain.switchToExpectedChain();
@@ -737,6 +894,15 @@ function switchPage(name) {
     security: "Security",
     settings: "Settings"
   })[name] || "KryptoVault";
+
+  if (name === "activity" && !isDemoModeEnabled()) {
+    const generation = accountStateGeneration;
+    loadAuditActivity().then((activities) => {
+      if (generation !== accountStateGeneration) return;
+      state.activities = activities;
+      renderActivity();
+    });
+  }
 }
 
 function applyTheme() {
@@ -913,6 +1079,12 @@ window.openFolder = async function(folderId) {
 
 function renderActivity() {
   const el = document.getElementById("activityTimeline");
+  const clearBtn = document.getElementById("clearActivityBtn");
+  if (clearBtn) {
+    clearBtn.hidden = !isDemoModeEnabled();
+    clearBtn.disabled = !isDemoModeEnabled();
+  }
+
   if (!state.activities.length) {
     el.innerHTML = `<div class="empty-state">No activity yet.</div>`;
     return;
@@ -1246,9 +1418,10 @@ function renderDocumentModal() {
       <div class="detail-card" style="grid-column:1/-1"><span>SHA-256 Fingerprint</span><code>${d.hash}</code></div>
     </div>
     <div class="modal-actions" style="margin-top:16px">
+      <button class="btn primary" onclick="openDecryptedDocument('${d.id}')">Open File</button>
       <button class="btn secondary" onclick="verifyIntegrity('${d.id}')">Verify Integrity</button>
-      <button class="btn primary" onclick="openShare('${d.id}')">Share</button>
-      <button class="btn ghost" onclick="simulateTamper('${d.id}')">Simulate Tampering</button>
+      <button class="btn secondary" onclick="openShare('${d.id}')">Share</button>
+      ${isDemoModeEnabled() ? `<button class="btn ghost" onclick="simulateTamper('${d.id}')">Simulate Tampering</button>` : ""}
     </div>
     <div class="inline-note" style="margin-top:14px">
       This demo does not upload plaintext file bytes to a server. It calculates a real SHA-256 hash in your browser and keeps mock records local to explicit demo mode.
@@ -1281,13 +1454,137 @@ function renderDocumentModal() {
     </div>
   ` : `<div class="empty-state">This document is private. <br><br><button class="btn primary" onclick="openShare('${d.id}')">Grant Access</button></div>`;
 
-  const acts = state.activities.filter(a => a.detail.includes(d.name));
+  const activityTabActive = activeDocumentTabName() === "activity";
+  const shouldLoadDocumentActivity = !isDemoModeEnabled() && activityTabActive && d.activityLoadedFor !== d.id;
+  if (shouldLoadDocumentActivity && !d.activityLoading) {
+    setTimeout(() => {
+      loadDocumentActivity(d).then(() => {
+        if (currentDocId === d.id && activeDocumentTabName() === "activity") renderDocumentModal();
+      });
+    }, 0);
+  }
+  const acts = isDemoModeEnabled() ? state.activities.filter(a => a.detail.includes(d.name)) : d.activity || [];
   document.getElementById("doc-tab-activity").innerHTML = acts.length
     ? acts.map(a => `<div class="detail-card" style="margin-bottom:8px"><strong>${escapeHtml(a.action)}</strong><br><span class="muted">${escapeHtml(a.detail)} • ${fmtDate(a.time)}</span></div>`).join("")
     : `<div class="empty-state">No document-specific activity yet.</div>`;
 
   renderDocumentBlockchainTab(d);
 }
+
+function normalizeHexHash(value) {
+  return String(value || "").trim().replace(/^0x/i, "").toLowerCase();
+}
+
+function safeBlobFilename(filename) {
+  const fallback = "kryptovault-document";
+  return String(filename || fallback)
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+    .trim() || fallback;
+}
+
+function openPlaintextBlob(plaintext, filename, mimeType) {
+  const blob = new Blob([plaintext], { type: mimeType || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const opened = window.open(url, "_blank", "noopener,noreferrer");
+
+  if (!opened) {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = safeBlobFilename(filename);
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+async function recoverOpenedAssetAesKey(openedAsset, documentHint) {
+  const wrappedAESKey = openedAsset.EK_User;
+  const wrappingMetadata = openedAsset.wrappingMetadata;
+
+  if (!wrappedAESKey || !wrappingMetadata) {
+    throw new Error("Wrapped document key is missing for this wallet.");
+  }
+
+  let password;
+  if (documentHint?.passwordProtectionEnabled || wrappingMetadata.algorithm === "PBKDF2-SHA-256+A256GCM") {
+    password = window.prompt("Enter this file's password.");
+    if (!password) {
+      throw new Error("File password is required to open this password-protected document.");
+    }
+  }
+
+  return window.KryptoVaultCrypto.recoverDocumentAesKey({
+    wrappedAESKey,
+    wrappingMetadata,
+    walletAddress: state.user.walletAddress,
+    password
+  });
+}
+
+async function decryptEncryptedAsset(assetId, documentHint = {}) {
+  if (!window.KryptoVaultApi) throw new Error("Document API is not available.");
+  if (!window.KryptoVaultCrypto) throw new Error("Document encryption support is not available.");
+  if (!state.user.walletAddress) throw new Error("Connect and authenticate your wallet before opening documents.");
+
+  const openResponse = await window.KryptoVaultApi.get(`/api/assets/${encodeURIComponent(assetId)}/open`);
+  const openedAsset = openResponse?.asset || {};
+  const ciphertextUrl = openedAsset.ciphertextUrl;
+  if (!ciphertextUrl) {
+    throw new Error("Encrypted document bytes are not available.");
+  }
+
+  const aesKey = await recoverOpenedAssetAesKey(openedAsset, documentHint);
+  const ciphertext = await window.KryptoVaultApi.get(ciphertextUrl, { responseType: "arrayBuffer" });
+  const plaintext = await window.KryptoVaultCrypto.decryptBytesWithAesGcm(
+    ciphertext,
+    aesKey,
+    openedAsset.encryptionMetadata
+  );
+
+  const actualSha256 = await window.KryptoVaultCrypto.sha256Hex(plaintext);
+  const expectedSha256 = normalizeHexHash(openedAsset.expectedSha256 || openedAsset.sha256 || documentHint.hash);
+  if (!expectedSha256 || normalizeHexHash(actualSha256) !== expectedSha256) {
+    throw new Error("Document integrity check failed. The decrypted bytes do not match the authoritative SHA-256 hash.");
+  }
+
+  return {
+    filename: openedAsset.filename || documentHint.name,
+    mimeType: openedAsset.mimeType || documentHint.mimeType,
+    plaintext,
+    expectedSha256,
+    sha256: actualSha256,
+    permission: openedAsset.permission,
+    currentVersion: openedAsset.currentVersion
+  };
+}
+
+async function openEncryptedAsset(assetId, documentHint = {}) {
+  const decrypted = await decryptEncryptedAsset(assetId, documentHint);
+  openPlaintextBlob(decrypted.plaintext, decrypted.filename, decrypted.mimeType);
+  return decrypted;
+}
+
+window.openDecryptedDocument = async function(docId) {
+  const doc = state.documents.find(x => x.id === docId);
+  if (!doc) return;
+
+  if (isDemoModeEnabled()) {
+    toast("Demo mode does not store encrypted document bytes.");
+    return;
+  }
+
+  try {
+    const opened = await openEncryptedAsset(doc.id, doc);
+    addActivity("Document opened", `${opened.filename || doc.name} decrypted locally after integrity verification`);
+    saveState();
+    toast("Document decrypted locally and integrity verified.");
+  } catch (error) {
+    toast(error?.message || "Document could not be opened.");
+  }
+};
 
 async function loadDocumentAccessGrants(doc, force = false) {
   const target = document.getElementById("doc-tab-access");
@@ -1329,14 +1626,23 @@ function renderDocumentBlockchainTab(doc) {
   const target = document.getElementById("doc-tab-blockchain");
 
   function renderDetail(record) {
+    const latest = record.latestKnownTransaction;
     target.innerHTML = `
       <div class="detail-grid">
         <div class="detail-card"><span>Document</span><strong>${escapeHtml(record.filename || doc.name)}</strong></div>
         <div class="detail-card"><span>Owner</span><strong>${record.ownerWallet ? shortHash(record.ownerWallet) : "Pending"}</strong></div>
+        <div class="detail-card"><span>Version</span><strong>${record.currentVersion || "Pending"}</strong></div>
+        <div class="detail-card"><span>Confirmation</span><strong>${escapeHtml(String(record.confirmationState || record.status || "pending").replaceAll("_", " "))}</strong></div>
+        <div class="detail-card"><span>Registration Block</span><strong>${record.blockNumber || "Pending"}</strong></div>
         <div class="detail-card"><span>Record Status</span><strong>${escapeHtml(String(record.status || "pending").replaceAll("_", " "))}</strong></div>
-        <div class="detail-card"><span>Block Number</span><strong>${record.blockNumber || "Pending"}</strong></div>
-        <div class="detail-card" style="grid-column:1/-1"><span>Transaction Hash</span><code>${record.registrationTxHash || "Pending"}</code></div>
-        <div class="detail-card" style="grid-column:1/-1"><span>Document Hash</span><code>${record.currentHash || doc.hash || "Pending"}</code></div>
+        <div class="detail-card" style="grid-column:1/-1"><span>Registration Transaction</span><code>${record.registrationTxHash || "Pending"}</code></div>
+        <div class="detail-card" style="grid-column:1/-1"><span>Current Hash</span><code>${record.currentHash || doc.hash || "Pending"}</code></div>
+        <div class="detail-card" style="grid-column:1/-1">
+          <span>Latest Chain Action</span>
+          <strong>${latest ? escapeHtml(String(latest.action || "").replaceAll("_", " ")) : "None known"}</strong>
+          <br><span class="muted">${latest?.detail ? escapeHtml(latest.detail) : "No grant, revoke, or version transaction recorded yet."}</span>
+          ${latest?.blockchainTxHash ? `<br><code>${escapeHtml(latest.blockchainTxHash)}</code>` : ""}
+        </div>
       </div>
     `;
   }
@@ -1348,7 +1654,15 @@ function renderDocumentBlockchainTab(doc) {
       currentHash: doc.hash,
       registrationTxHash: doc.txHash,
       blockNumber: doc.blockNumber,
-      status: doc.verified ? "VERIFIED" : "PENDING"
+      status: doc.verified ? "VERIFIED" : "PENDING",
+      confirmationState: doc.verified ? "CONFIRMED" : "PENDING",
+      latestKnownTransaction: doc.txHash
+        ? {
+            action: "DOCUMENT_REGISTERED",
+            detail: "Demo blockchain proof recorded",
+            blockchainTxHash: doc.txHash
+          }
+        : null
     });
     return;
   }
@@ -1568,8 +1882,109 @@ window.openRevoke = function(docId, permId) {
   if (!d || !p) return;
   pendingRevoke = { docId, permId };
   document.getElementById("revokeText").textContent = `Revoke ${p.name}'s access to ${d.name}?`;
+  const standardMode = document.querySelector('input[name="revokeMode"][value="standard"]');
+  const strongMode = document.querySelector('input[name="revokeMode"][value="strong"]');
+  if (standardMode) standardMode.checked = true;
+  if (strongMode) {
+    strongMode.disabled = false;
+    strongMode.closest(".radio-card")?.classList.remove("disabled");
+  }
   openModal("revokeModal");
 };
+
+async function wrapStrongRevokeKeyForRecipients(aesKey, recipients, ownerPassword) {
+  return Promise.all(recipients.map(async (recipient) => {
+    if (recipient.requiresPasswordWrapping) {
+      if (!ownerPassword) {
+        throw new Error("File password is required to rotate this password-protected document.");
+      }
+      const wrapped = await window.KryptoVaultCrypto.wrapDocumentAesKeyWithPassword(aesKey, ownerPassword);
+      return {
+        walletAddress: recipient.walletAddress,
+        wrappedAESKey: wrapped.wrappedAESKey,
+        wrappingMetadata: wrapped.wrappingMetadata
+      };
+    }
+
+    if (!recipient.publicEncryptionKey) {
+      throw new Error(`Public encryption key is missing for ${shortHash(recipient.walletAddress)}.`);
+    }
+
+    return {
+      walletAddress: recipient.walletAddress,
+      wrappedAESKey: await window.KryptoVaultCrypto.wrapDocumentAesKey(aesKey, recipient.publicEncryptionKey),
+      wrappingMetadata: {
+        algorithm: "RSA-OAEP",
+        keyId: `recipient:${recipient.walletAddress}`
+      }
+    };
+  }));
+}
+
+async function completeStrongRevokeRotation(doc, granteeWallet, revokeTxHash) {
+  if (!window.KryptoVaultCrypto) {
+    throw new Error("Document encryption support is not available.");
+  }
+
+  const preparation = await window.KryptoVaultApi.post(
+    `/api/assets/${encodeURIComponent(doc.id)}/access/strong-revoke/prepare`,
+    {
+      granteeWallet
+    }
+  );
+  const strongRevoke = preparation?.strongRevoke;
+  if (!strongRevoke?.recipients?.length) {
+    throw new Error("Backend did not return authorized recipients for strong revocation.");
+  }
+
+  const decrypted = await decryptEncryptedAsset(doc.id, doc);
+  const expectedSha256 = normalizeHexHash(strongRevoke.expectedSha256);
+  if (normalizeHexHash(decrypted.sha256) !== expectedSha256) {
+    throw new Error("Current plaintext does not match the authoritative asset hash.");
+  }
+
+  const nextAesKey = await window.KryptoVaultCrypto.generateDocumentAesKey();
+  const encrypted = await window.KryptoVaultCrypto.encryptBytesWithAesGcm(decrypted.plaintext, nextAesKey);
+  const nextSha256 = await window.KryptoVaultCrypto.sha256Hex(decrypted.plaintext);
+  let ownerPassword;
+  if (strongRevoke.passwordProtectionEnabled) {
+    ownerPassword = window.prompt("Enter this file's password to wrap the rotated key.");
+    if (!ownerPassword) {
+      throw new Error("File password is required to finish strong revocation.");
+    }
+  }
+
+  const wrappedKeys = await wrapStrongRevokeKeyForRecipients(nextAesKey, strongRevoke.recipients, ownerPassword);
+  const revokedWallet = String(granteeWallet || "").trim().toLowerCase();
+  if (wrappedKeys.some((key) => String(key.walletAddress || "").trim().toLowerCase() === revokedWallet)) {
+    throw new Error("Revoked wallet must not receive the rotated document key.");
+  }
+
+  const versionTx = await window.KryptoVaultBlockchain.commitVersion(doc.blockchainAssetId, nextSha256);
+  const versionReceipt = await versionTx.wait(1);
+  if (!versionReceipt || Number(versionReceipt.status) !== 1) {
+    throw new Error("Blockchain version commit transaction failed.");
+  }
+
+  const form = new FormData();
+  form.append("expectedPreviousVersion", String(strongRevoke.currentVersion));
+  form.append("newVersion", String(strongRevoke.nextVersion));
+  form.append("sha256", nextSha256);
+  form.append("encryptionMetadata", JSON.stringify(encrypted.encryptionMetadata));
+  form.append("wrappedKeys", JSON.stringify(wrappedKeys));
+  form.append("blockchainTransactionHash", versionTx.hash);
+  form.append("commitMessage", `Strong revocation after revoke ${shortHash(revokeTxHash)}`);
+  form.append(
+    "encryptedFile",
+    new Blob([encrypted.encryptedBytes], { type: "application/octet-stream" }),
+    `${doc.name}.v${strongRevoke.nextVersion}.enc`
+  );
+
+  return window.KryptoVaultApi.post(
+    `/api/assets/${encodeURIComponent(doc.id)}/access/strong-revoke/finalize`,
+    form
+  );
+}
 
 async function confirmRevoke() {
   if (!pendingRevoke) return;
@@ -1593,7 +2008,7 @@ async function confirmRevoke() {
     return;
   }
 
-  if (!window.KryptoVaultBlockchain) return toast("Blockchain service is not available.");
+  if (!window.KryptoVaultApi || !window.KryptoVaultBlockchain) return toast("Access revocation services are not available.");
   if (!d.blockchainAssetId || d.blockchainVerificationStatus !== "verified") {
     return toast("This document must be registered and verified on-chain before revoking access.");
   }
@@ -1602,20 +2017,34 @@ async function confirmRevoke() {
   const revokeButton = document.getElementById("confirmRevokeBtn");
   const previousButtonText = revokeButton.textContent;
   revokeButton.disabled = true;
-  revokeButton.textContent = "Revoking...";
+  revokeButton.textContent = mode === "strong" ? "Revoking + rotating..." : "Revoking...";
 
   try {
-    const tx = await window.KryptoVaultBlockchain.revokeAccess(d.blockchainAssetId, p.wallet || p.recipient);
+    const granteeWallet = p.wallet || p.recipient;
+    const tx = await window.KryptoVaultBlockchain.revokeAccess(d.blockchainAssetId, granteeWallet);
     const receipt = await tx.wait(1);
     if (!receipt || Number(receipt.status) !== 1) {
       throw new Error("Blockchain revoke transaction failed.");
     }
-    await loadDocumentAccessGrants(d, true);
-    addActivity("Access revoked", `${p.name} lost access to ${d.name}`);
-    addActivity("Blockchain permission revoked", `Revoke transaction ${shortHash(tx.hash)} confirmed for ${d.name}`);
+    await window.KryptoVaultApi.post(`/api/assets/${encodeURIComponent(d.id)}/access/revoke-sync`, {
+      granteeWallet,
+      blockchainTransactionHash: tx.hash
+    });
+    if (mode === "strong") {
+      await completeStrongRevokeRotation(d, granteeWallet, tx.hash);
+    }
+    await refreshWorkspaceState();
+    const refreshedDoc = state.documents.find(x => x.id === d.id) || d;
+    await loadDocumentAccessGrants(refreshedDoc, true);
+    addActivity("Access revoked", `${p.name} lost access to ${refreshedDoc.name}`);
+    addActivity("Blockchain permission revoked", `Revoke transaction ${shortHash(tx.hash)} confirmed for ${refreshedDoc.name}`);
+    if (mode === "strong") {
+      addActivity("Strong revoke completed", `${refreshedDoc.name} rotated to version ${refreshedDoc.currentVersion}`);
+    }
+    currentDocId = refreshedDoc.id;
     closeModal("revokeModal");
     saveState();
-    toast("Access revoked on-chain.");
+    toast(mode === "strong" ? "Access revoked and current file key rotated." : "Access revoked on-chain.");
   } catch (error) {
     toastError(error, "Access revocation failed.");
   } finally {
@@ -1624,15 +2053,54 @@ async function confirmRevoke() {
   }
 }
 
-window.verifyIntegrity = function(docId) {
+window.verifyIntegrity = async function(docId) {
   const d = state.documents.find(x => x.id === docId);
   if (!d) return;
-  toast(d.tampered ? "Integrity FAILED: hash mismatch detected." : "Integrity verified: blockchain hash matches.");
-  addActivity(d.tampered ? "Integrity check failed" : "Integrity verified", `${d.name} ${d.tampered ? "hash mismatch detected" : "matched its recorded fingerprint"}`);
-  saveState();
+
+  if (isDemoModeEnabled()) {
+    toast(d.tampered ? "Integrity FAILED: hash mismatch detected." : "Integrity verified: blockchain hash matches.");
+    addActivity(d.tampered ? "Integrity check failed" : "Integrity verified", `${d.name} ${d.tampered ? "hash mismatch detected" : "matched its recorded fingerprint"}`);
+    saveState();
+    return;
+  }
+
+  if (!window.KryptoVaultApi || !window.KryptoVaultCrypto) {
+    toast("Integrity verification support is not available.");
+    return;
+  }
+
+  try {
+    const response = await window.KryptoVaultApi.get(`/api/assets/${encodeURIComponent(docId)}/integrity`);
+    const integrity = response?.integrity || {};
+    const expectedSha256 = normalizeHexHash(integrity.expectedSha256);
+    const blockchainSha256 = normalizeHexHash(integrity.blockchainSha256);
+    if (!expectedSha256 || expectedSha256 !== blockchainSha256 || integrity.blockchainVerificationStatus !== "verified") {
+      throw new Error("Blockchain integrity verification failed.");
+    }
+
+    const decrypted = await decryptEncryptedAsset(docId, d);
+    const actualSha256 = decrypted.sha256;
+    if (normalizeHexHash(actualSha256) !== expectedSha256) {
+      toast("MISMATCH: local plaintext hash does not match the blockchain record.");
+      addActivity("Integrity check failed", `${d.name} local plaintext hash mismatch detected`);
+      saveState();
+      return;
+    }
+
+    toast("VERIFIED: local plaintext hash matches the blockchain record.");
+    addActivity("Integrity verified", `${d.name} matched blockchain version ${integrity.currentVersion}`);
+    saveState();
+  } catch (error) {
+    toast(error?.message || "Integrity verification failed.");
+  }
 };
 
 window.simulateTamper = function(docId) {
+  if (!isDemoModeEnabled()) {
+    toast("Simulate Tampering is available only in demo mode.");
+    return;
+  }
+
   const d = state.documents.find(x => x.id === docId);
   if (!d) return;
   d.tampered = !d.tampered;
@@ -1640,31 +2108,27 @@ window.simulateTamper = function(docId) {
   saveState();
   toast(d.tampered ? "Tamper mode ON. Integrity checks will fail." : "Tamper mode cleared.");
 };
-
 window.openSharedDocument = async function(sharedId) {
   const s = state.shared.find(x => x.id === sharedId);
   if (!s) return;
   if (isDemoModeEnabled()) {
-  toast("Checking wallet → permission → decryption simulation...");
+    toast("Checking wallet permission in demo mode...");
     await delay(800);
     addActivity("Shared document opened", `${s.name} opened after simulated access verification`);
     saveState();
-    toast("Access granted. Document decryption simulated.");
+    toast("Access granted in demo mode.");
     return;
   }
 
-  if (!window.KryptoVaultApi) return toast("Document API is not available.");
-
   try {
-    await window.KryptoVaultApi.get(`/api/assets/${encodeURIComponent(s.assetId || s.id)}/open`);
-    addActivity("Shared document opened", `${s.name} opened after backend and blockchain access verification`);
+    const opened = await openEncryptedAsset(s.assetId || s.id, s);
+    addActivity("Shared document opened", `${opened.filename || s.name} decrypted locally after blockchain access verification`);
     saveState();
-    toast("Access verified. Encrypted document metadata loaded.");
+    toast("Shared document decrypted locally and integrity verified.");
   } catch (error) {
     toast(error?.message || "Shared document could not be opened.");
   }
 };
-
 window.moveDocument = function(docId) {
   const doc = state.documents.find(d => d.id === docId);
   if (!doc) return;
@@ -1734,8 +2198,9 @@ async function createFolder() {
 async function connectWallet() {
   if (window.ethereum?.request && !isDemoModeEnabled()) {
     try {
+      resetAccountScopedState("Authenticating wallet...");
       const user = await authenticateWallet();
-      saveState();
+      await loadBackendState();
       toast(`Wallet authenticated: ${shortHash(user.walletAddress)}`);
       return;
     } catch (err) {
@@ -1826,7 +2291,7 @@ document.addEventListener("DOMContentLoaded", () => {
       document.querySelectorAll("[data-doc-tab]").forEach(t => t.classList.toggle("active", t === tab));
       document.querySelectorAll(".doc-tab").forEach(p => p.classList.remove("active"));
       document.getElementById(`doc-tab-${tab.dataset.docTab}`).classList.add("active");
-      if (tab.dataset.docTab === "access" && currentDocId) {
+      if ((tab.dataset.docTab === "access" || tab.dataset.docTab === "activity") && currentDocId) {
         renderDocumentModal();
       }
     });
@@ -1842,6 +2307,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   document.getElementById("clearActivityBtn").addEventListener("click", () => {
+    if (!isDemoModeEnabled()) {
+      toast("Real audit activity cannot be cleared.");
+      return;
+    }
     state.activities = [];
     saveState();
   });
@@ -1866,3 +2335,4 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 });
+

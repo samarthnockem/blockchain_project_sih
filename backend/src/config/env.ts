@@ -1,6 +1,9 @@
 import "dotenv/config";
 import { z } from "zod";
 
+const ethereumRpcUrl = process.env.ETHEREUM_RPC_URL ?? process.env.BLOCKCHAIN_RPC_URL ?? "https://rpc.sepolia.org";
+const expectedChainId = process.env.EXPECTED_CHAIN_ID ?? process.env.CHAIN_ID ?? "11155111";
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
@@ -31,9 +34,19 @@ const envSchema = z.object({
   SESSION_TTL_MS: z.coerce.number().int().positive().default(24 * 60 * 60 * 1000),
   ENCRYPTED_ASSET_MAX_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
   GRIDFS_BUCKET_NAME: z.string().trim().min(1).default("encryptedAssets"),
-  BLOCKCHAIN_RPC_URL: z.string().url().default("http://127.0.0.1:8545"),
+  ETHEREUM_RPC_URL: z.string().url(),
   CONTRACT_ADDRESS: z.string().regex(/^0x[a-fA-F0-9]{40}$/).default("0x0000000000000000000000000000000000000000"),
-  CHAIN_ID: z.coerce.number().int().positive().default(31337),
+  EXPECTED_CHAIN_ID: z.coerce.number().int().positive(),
 });
 
-export const env = envSchema.parse(process.env);
+const parsedEnv = envSchema.parse({
+  ...process.env,
+  ETHEREUM_RPC_URL: ethereumRpcUrl,
+  EXPECTED_CHAIN_ID: expectedChainId
+});
+
+export const env = {
+  ...parsedEnv,
+  BLOCKCHAIN_RPC_URL: parsedEnv.ETHEREUM_RPC_URL,
+  CHAIN_ID: parsedEnv.EXPECTED_CHAIN_ID
+};

@@ -8,10 +8,12 @@
   });
 
   const defaultConfig = Object.freeze({
-    expectedChainId: 31337,
-    expectedChainName: "Hardhat Local",
-    deploymentUrl: "/blockchain/exports/KryptoVaultAccess.local.json",
-    rpcUrls: ["http://127.0.0.1:8545"],
+    expectedChainId: 11155111,
+    expectedChainName: "Sepolia",
+    deploymentUrl: "",
+    abiUrl: "/blockchain/exports/KryptoVaultAccess.abi.json",
+    rpcUrls: ["https://rpc.sepolia.org"],
+    blockExplorerUrls: ["https://sepolia.etherscan.io"],
     nativeCurrency: {
       name: "ETH",
       symbol: "ETH",
@@ -59,24 +61,41 @@
     if (cachedConfig) return cachedConfig;
 
     const configSource = { ...defaultConfig, ...(window.KRYPTO_BLOCKCHAIN_CONFIG || {}) };
+    const deploymentUrl = configSource.DEPLOYMENT_URL || configSource.deploymentUrl;
+    const abiUrl = configSource.ABI_URL || configSource.abiUrl;
     let deployment = {};
+    let abi = configSource.ABI || configSource.abi;
 
-    if (configSource.deploymentUrl) {
-      const response = await fetch(configSource.deploymentUrl, { cache: "no-store" });
+    if (deploymentUrl) {
+      const response = await fetch(deploymentUrl, { cache: "no-store" });
       if (!response.ok) {
         throw new BlockchainError(
-          `Unable to load blockchain deployment config from ${configSource.deploymentUrl}. Run npm run deploy:local in blockchain/.`,
+          `Unable to load blockchain deployment config from ${deploymentUrl}. Check the configured deployment export.`,
           "BLOCKCHAIN_CONFIG_NOT_FOUND",
-          { deploymentUrl: configSource.deploymentUrl, status: response.status }
+          { deploymentUrl, status: response.status }
         );
       }
       deployment = await response.json();
+      abi = abi || deployment.abi;
+    }
+
+    if (!abi && abiUrl) {
+      const response = await fetch(abiUrl, { cache: "no-store" });
+      if (!response.ok) {
+        throw new BlockchainError(
+          `Unable to load blockchain ABI from ${abiUrl}. Run npm run compile and npm run export:abi in blockchain/.`,
+          "BLOCKCHAIN_ABI_NOT_FOUND",
+          { abiUrl, status: response.status }
+        );
+      }
+      abi = await response.json();
     }
 
     const ethers = requireEthers();
-    const expectedChainId = Number(configSource.expectedChainId || deployment.chainId);
-    const contractAddress = configSource.contractAddress || deployment.contractAddress;
-    const abi = configSource.abi || deployment.abi;
+    const expectedChainId = Number(configSource.EXPECTED_CHAIN_ID || configSource.expectedChainId || deployment.chainId);
+    const contractAddress = configSource.CONTRACT_ADDRESS || configSource.contractAddress || deployment.contractAddress;
+    const rpcUrls = configSource.RPC_URLS || configSource.rpcUrls || deployment.rpcUrls || [];
+    const blockExplorerUrls = configSource.BLOCK_EXPLORER_URLS || configSource.blockExplorerUrls || deployment.blockExplorerUrls || [];
 
     if (!Number.isInteger(expectedChainId) || expectedChainId <= 0) {
       throw new BlockchainError("Blockchain config is missing a valid expected chain ID.", "INVALID_BLOCKCHAIN_CONFIG");
@@ -92,11 +111,43 @@
       ...configSource,
       ...deployment,
       expectedChainId,
-      expectedChainName: configSource.expectedChainName || deployment.network || `chain ${expectedChainId}`,
+      expectedChainName: configSource.EXPECTED_CHAIN_NAME || configSource.expectedChainName || deployment.network || `chain ${expectedChainId}`,
       contractAddress,
-      abi
+      abi,
+      rpcUrls,
+      blockExplorerUrls
     };
     return cachedConfig;
+  }
+
+  function parseChainId(chainId) {
+    if (typeof chainId === "number") return chainId;
+    if (typeof chainId === "bigint") return Number(chainId);
+    if (typeof chainId === "string" && chainId.startsWith("0x")) return Number.parseInt(chainId, 16);
+    return Number(chainId);
+  }
+
+  async function getCurrentNetworkStatus() {
+    const ethereum = requireMetaMask();
+    const config = await loadConfig();
+    const chainId = await ethereum.request({ method: "eth_chainId" });
+    const actualChainId = parseChainId(chainId);
+
+    return {
+      actualChainId,
+      expectedChainId: config.expectedChainId,
+      expectedChainName: config.expectedChainName,
+      isExpectedChain: actualChainId === config.expectedChainId
+    };
+  }
+
+  async function assertExpectedWalletChain(ethereum, config) {
+    const chainId = await ethereum.request({ method: "eth_chainId" });
+    const actualChainId = parseChainId(chainId);
+    if (actualChainId !== config.expectedChainId) {
+      throw new WrongNetworkError(config.expectedChainId, actualChainId, config.expectedChainName);
+    }
+    return actualChainId;
   }
 
   async function assertExpectedChain(provider, config) {
@@ -112,7 +163,7 @@
     const code = await provider.getCode(config.contractAddress);
     if (!code || code === "0x") {
       throw new BlockchainError(
-        `KryptoVault contract is not deployed at ${config.contractAddress} on ${config.expectedChainName}. Restart Hardhat and run npm run deploy:local in blockchain/.`,
+        `KryptoVault contract is not deployed at ${config.contractAddress} on ${config.expectedChainName}. Check the configured deployment address.`,
         "CONTRACT_NOT_DEPLOYED",
         { contractAddress: config.contractAddress, expectedChainId: config.expectedChainId }
       );
@@ -120,7 +171,7 @@
   }
 
   function chainIdToHex(chainId) {
-    return `0x${Number(chainId).toString(16).toUpperCase()}`;
+    return `0x${Number(chainId).toString(16)}`;
   }
 
   function isUnknownChainError(error) {
@@ -146,13 +197,22 @@
         throw error;
       }
 
+      if (!Array.isArray(config.rpcUrls) || config.rpcUrls.length === 0) {
+        throw new BlockchainError(
+          `MetaMask does not know ${config.expectedChainName}. Add the network in MetaMask or configure RPC_URLS for wallet_addEthereumChain.`,
+          "CHAIN_RPC_URLS_REQUIRED",
+          { expectedChainId: config.expectedChainId, expectedChainName: config.expectedChainName }
+        );
+      }
+
       await ethereum.request({
         method: "wallet_addEthereumChain",
         params: [
           {
             chainId,
             chainName: config.expectedChainName,
-            rpcUrls: config.rpcUrls || defaultConfig.rpcUrls,
+            rpcUrls: config.rpcUrls,
+            blockExplorerUrls: config.blockExplorerUrls,
             nativeCurrency: config.nativeCurrency || defaultConfig.nativeCurrency
           }
         ]
@@ -163,10 +223,12 @@
     const ethers = requireEthers();
     const provider = new ethers.BrowserProvider(ethereum);
     const actualChainId = await assertExpectedChain(provider, config);
+    await assertContractDeployed(provider, config);
+    const contract = new ethers.Contract(config.contractAddress, config.abi, provider);
     window.dispatchEvent(new CustomEvent("kryptovault:blockchain-network-changed", {
       detail: { chainId: actualChainId, expectedChainName: config.expectedChainName }
     }));
-    return { chainId: actualChainId, config };
+    return { provider, contract, chainId: actualChainId, config };
   }
 
   function normalizeSha256Hash(sha256Hash) {
@@ -231,6 +293,7 @@
     const ethers = requireEthers();
     const ethereum = requireMetaMask();
     const config = await loadConfig();
+    await assertExpectedWalletChain(ethereum, config);
     const provider = new ethers.BrowserProvider(ethereum);
 
     await provider.send("eth_requestAccounts", []);
@@ -247,6 +310,7 @@
     const ethers = requireEthers();
     const ethereum = requireMetaMask();
     const config = await loadConfig();
+    await assertExpectedWalletChain(ethereum, config);
     const provider = new ethers.BrowserProvider(ethereum);
     const chainId = await assertExpectedChain(provider, config);
     await assertContractDeployed(provider, config);
@@ -292,6 +356,7 @@
     BlockchainError,
     WrongNetworkError,
     loadConfig,
+    getCurrentNetworkStatus,
     connectProvider,
     switchToExpectedChain,
     registerAsset,

@@ -1,4 +1,5 @@
 export { AccessGrantModel, type AccessGrant } from "./access-grant.js";
+export { AuditEventModel, type AuditEvent } from "./audit-event.js";
 export { AssetModel, type Asset } from "./asset.js";
 export { AssetAuditEventModel, type AssetAuditEvent } from "./asset-audit-event.js";
 export { AssetVersionModel, type AssetVersion } from "./asset-version.js";

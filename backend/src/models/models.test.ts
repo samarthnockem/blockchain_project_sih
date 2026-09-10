@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { AccessGrantModel } from "./access-grant.js";
 import { AssetAuditEventModel } from "./asset-audit-event.js";
 import { AssetModel } from "./asset.js";
+import { AuditEventModel } from "./audit-event.js";
 import { AssetVersionModel } from "./asset-version.js";
 import { FolderModel } from "./folder.js";
 import { forbiddenSensitiveFields } from "./schema-guards.js";
@@ -16,6 +17,7 @@ const validObjectId = new mongoose.Types.ObjectId();
 const modelsToCheck = [
   UserModel,
   AssetModel,
+  AuditEventModel,
   WrappedKeyModel,
   AssetVersionModel,
   FolderModel,
@@ -107,6 +109,23 @@ describe("Secure Vault models", () => {
     expect(auditEvent.actorWallet).toBe(validWallet);
     expect(AssetAuditEventModel.schema.path("plaintextFile")).toBeUndefined();
     expect(AssetAuditEventModel.schema.path("aesKey")).toBeUndefined();
+  });
+
+  it("validates AuditEvent safe product activity only", async () => {
+    const auditEvent = new AuditEventModel({
+      walletAddress: validWallet.toUpperCase(),
+      assetId: validObjectId,
+      action: "ASSET_OPENED",
+      detail: "encrypted-document.bin opened after access verification",
+      blockchainTxHash: `0x${"c".repeat(64)}`
+    });
+
+    await expect(auditEvent.validate()).resolves.toBeUndefined();
+    expect(auditEvent.walletAddress).toBe(validWallet);
+    expect(AuditEventModel.schema.path("cookie")).toBeUndefined();
+    expect(AuditEventModel.schema.path("sessionId")).toBeUndefined();
+    expect(AuditEventModel.schema.path("wrappedAESKey")).toBeUndefined();
+    expect(AuditEventModel.schema.path("plaintextFile")).toBeUndefined();
   });
 
   it("validates AccessGrant as non-authoritative blockchain transaction metadata only", async () => {
@@ -270,6 +289,8 @@ describe("Secure Vault models", () => {
     expect(AssetModel.schema.indexes()).toContainEqual([{ ownerWallet: 1, folderId: 1 }, {}]);
     expect(AssetAuditEventModel.schema.indexes()).toContainEqual([{ assetId: 1, createdAt: -1 }, {}]);
     expect(AssetAuditEventModel.schema.indexes()).toContainEqual([{ ownerWallet: 1, createdAt: -1 }, {}]);
+    expect(AuditEventModel.schema.indexes()).toContainEqual([{ walletAddress: 1, timestamp: -1 }, {}]);
+    expect(AuditEventModel.schema.indexes()).toContainEqual([{ assetId: 1, timestamp: -1 }, {}]);
     expect(AccessGrantModel.schema.indexes()).toContainEqual([{ assetId: 1, granteeWallet: 1, status: 1 }, {}]);
     expect(AccessGrantModel.schema.indexes()).toContainEqual([{ granteeWallet: 1, status: 1 }, {}]);
     expect(AccessGrantModel.schema.indexes()).toContainEqual([{ ownerWallet: 1, assetId: 1 }, {}]);

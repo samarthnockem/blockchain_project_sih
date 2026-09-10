@@ -9,6 +9,7 @@ import { generalApiLimiter } from "./middleware/rate-limit.js";
 import { requestId } from "./middleware/request-id.js";
 import { requestLogger } from "./middleware/request-logger.js";
 import { healthRouter } from "./routes/health.js";
+import { activityRouter } from "./routes/activity.js";
 import { authRouter } from "./routes/auth.js";
 import { readyRouter } from "./routes/ready.js";
 import { usersRouter } from "./routes/users.js";
@@ -34,6 +35,7 @@ export function createApp() {
   app.use(requestLogger);
 
   app.use("/api", generalApiLimiter);
+  app.use("/api/activity", activityRouter);
   app.use("/api/auth", authRouter);
   app.use("/api/assets", assetsRouter);
   app.use("/api/folders", foldersRouter);

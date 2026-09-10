@@ -14,6 +14,12 @@ const assetRegisteredInterface = new Interface([
 const accessGrantedInterface = new Interface([
   "event AccessGranted(uint256 indexed assetId, address indexed owner, address indexed grantee, uint8 permission, uint64 validFrom, uint64 validUntil)"
 ]);
+const accessRevokedInterface = new Interface([
+  "event AccessRevoked(uint256 indexed assetId, address indexed owner, address indexed grantee)"
+]);
+const versionCommittedInterface = new Interface([
+  "event VersionCommitted(uint256 indexed assetId, address indexed committer, bytes32 sha256Hash, uint256 version)"
+]);
 
 function fakeProvider(chainId = 31337n, receipt: unknown = null) {
   return {
@@ -109,6 +115,74 @@ function accessGrantedReceipt(overrides: {
     from: overrides.from ?? ownerWallet,
     to: overrides.to ?? contractAddress,
     blockNumber: 12346,
+    logs: [
+      {
+        address: overrides.address ?? contractAddress,
+        topics: event.topics,
+        data: event.data
+      }
+    ]
+  };
+}
+
+function accessRevokedReceipt(overrides: {
+  assetId?: bigint;
+  owner?: string;
+  grantee?: string;
+  status?: number;
+  from?: string;
+  to?: string;
+  address?: string;
+} = {}) {
+  const event = accessRevokedInterface.encodeEventLog(
+    accessRevokedInterface.getEvent("AccessRevoked"),
+    [
+      overrides.assetId ?? 100n,
+      overrides.owner ?? ownerWallet,
+      overrides.grantee ?? readerWallet
+    ]
+  );
+
+  return {
+    status: overrides.status ?? 1,
+    from: overrides.from ?? ownerWallet,
+    to: overrides.to ?? contractAddress,
+    blockNumber: 12347,
+    logs: [
+      {
+        address: overrides.address ?? contractAddress,
+        topics: event.topics,
+        data: event.data
+      }
+    ]
+  };
+}
+
+function versionCommittedReceipt(overrides: {
+  assetId?: bigint;
+  committer?: string;
+  sha256Hash?: string;
+  version?: number;
+  status?: number;
+  from?: string;
+  to?: string;
+  address?: string;
+} = {}) {
+  const event = versionCommittedInterface.encodeEventLog(
+    versionCommittedInterface.getEvent("VersionCommitted"),
+    [
+      overrides.assetId ?? 100n,
+      overrides.committer ?? ownerWallet,
+      overrides.sha256Hash ?? validHash,
+      overrides.version ?? 3
+    ]
+  );
+
+  return {
+    status: overrides.status ?? 1,
+    from: overrides.from ?? ownerWallet,
+    to: overrides.to ?? contractAddress,
+    blockNumber: 12348,
     logs: [
       {
         address: overrides.address ?? contractAddress,
@@ -364,6 +438,124 @@ describe("blockchain read service", () => {
           expectedAccessType: "READ",
           expectedValidFrom: 0,
           expectedValidUntil: 0
+        })
+      ).rejects.toBeInstanceOf(BlockchainVerificationError);
+    }
+  });
+
+  it("verifies an AccessRevoked transaction for expected asset, owner, and grantee", async () => {
+    const receipt = accessRevokedReceipt({ assetId: 100n });
+    const provider = fakeProvider(31337n, receipt);
+    const service = createBlockchainReadService({
+      provider,
+      contract: fakeContract(),
+      contractAddress,
+      chainId: 31337
+    });
+
+    await expect(
+      service.verifyAccessRevoke({
+        transactionHash,
+        blockchainAssetId: "100",
+        expectedOwnerWallet: ownerWallet,
+        expectedGranteeWallet: readerWallet
+      })
+    ).resolves.toEqual({
+      blockchainAssetId: "100",
+      transactionHash,
+      blockNumber: 12347,
+      ownerWallet,
+      granteeWallet: readerWallet
+    });
+  });
+
+  it("rejects failed or unrelated access revoke receipts", async () => {
+    const cases = [
+      accessRevokedReceipt({ status: 0 }),
+      accessRevokedReceipt({ from: readerWallet }),
+      accessRevokedReceipt({ owner: readerWallet }),
+      accessRevokedReceipt({ grantee: ownerWallet }),
+      accessRevokedReceipt({ assetId: 101n }),
+      accessRevokedReceipt({ to: readerWallet }),
+      accessRevokedReceipt({ address: readerWallet }),
+      { ...accessRevokedReceipt(), logs: [] }
+    ];
+
+    for (const receipt of cases) {
+      const service = createBlockchainReadService({
+        provider: fakeProvider(31337n, receipt),
+        contract: fakeContract(),
+        contractAddress,
+        chainId: 31337
+      });
+
+      await expect(
+        service.verifyAccessRevoke({
+          transactionHash,
+          blockchainAssetId: "100",
+          expectedOwnerWallet: ownerWallet,
+          expectedGranteeWallet: readerWallet
+        })
+      ).rejects.toBeInstanceOf(BlockchainVerificationError);
+    }
+  });
+
+  it("verifies a VersionCommitted transaction for expected asset, committer, hash, and version", async () => {
+    const receipt = versionCommittedReceipt({ assetId: 100n, version: 3 });
+    const provider = fakeProvider(31337n, receipt);
+    const service = createBlockchainReadService({
+      provider,
+      contract: fakeContract(),
+      contractAddress,
+      chainId: 31337
+    });
+
+    await expect(
+      service.verifyVersionCommit({
+        transactionHash,
+        blockchainAssetId: "100",
+        expectedCommitterWallet: ownerWallet,
+        expectedSha256: "a".repeat(64),
+        expectedVersion: 3
+      })
+    ).resolves.toEqual({
+      blockchainAssetId: "100",
+      transactionHash,
+      blockNumber: 12348,
+      committerWallet: ownerWallet,
+      sha256: "a".repeat(64),
+      version: 3
+    });
+  });
+
+  it("rejects failed or unrelated version commit receipts", async () => {
+    const cases = [
+      versionCommittedReceipt({ status: 0 }),
+      versionCommittedReceipt({ from: readerWallet }),
+      versionCommittedReceipt({ committer: readerWallet }),
+      versionCommittedReceipt({ assetId: 101n }),
+      versionCommittedReceipt({ sha256Hash: `0x${"b".repeat(64)}` }),
+      versionCommittedReceipt({ version: 4 }),
+      versionCommittedReceipt({ to: readerWallet }),
+      versionCommittedReceipt({ address: readerWallet }),
+      { ...versionCommittedReceipt(), logs: [] }
+    ];
+
+    for (const receipt of cases) {
+      const service = createBlockchainReadService({
+        provider: fakeProvider(31337n, receipt),
+        contract: fakeContract(),
+        contractAddress,
+        chainId: 31337
+      });
+
+      await expect(
+        service.verifyVersionCommit({
+          transactionHash,
+          blockchainAssetId: "100",
+          expectedCommitterWallet: ownerWallet,
+          expectedSha256: "a".repeat(64),
+          expectedVersion: 3
         })
       ).rejects.toBeInstanceOf(BlockchainVerificationError);
     }

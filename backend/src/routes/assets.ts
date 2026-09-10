@@ -1,5 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
+import mongoose from "mongoose";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { HttpError } from "../errors/http-error.js";
@@ -8,10 +9,12 @@ import { AssetAuditEventModel } from "../models/asset-audit-event.js";
 import { AssetModel } from "../models/asset.js";
 import { AssetVersionModel } from "../models/asset-version.js";
 import { AccessGrantModel } from "../models/access-grant.js";
+import { AuditEventModel } from "../models/audit-event.js";
 import { FolderModel } from "../models/folder.js";
 import { UserModel } from "../models/user.js";
 import { WrappedKeyModel } from "../models/wrapped-key.js";
 import { BlockchainVerificationError, createBlockchainReadService } from "../services/blockchain-read.js";
+import { recordAuditEvent, safeAuditEvent } from "../services/audit-events.js";
 import { deleteEncryptedAsset, getEncryptedAsset, storeEncryptedAsset } from "../services/encrypted-asset-storage.js";
 
 const upload = multer({
@@ -313,6 +316,83 @@ const grantAccessSyncBodySchema = z
     }
   });
 
+const revokeAccessSyncBodySchema = z
+  .object({
+    granteeWallet: walletAddressSchema,
+    blockchainTransactionHash: z
+      .string()
+      .trim()
+      .regex(/^0x[a-fA-F0-9]{64}$/)
+      .transform((value) => value.toLowerCase())
+  })
+  .strict();
+
+const strongRevokePrepareBodySchema = z
+  .object({
+    granteeWallet: walletAddressSchema
+  })
+  .strict();
+
+const wrappedKeySetSchema = z
+  .string()
+  .transform((value, ctx) => {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (containsForbiddenSecretField(parsed)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Wrapped-key set contains forbidden secret fields"
+        });
+        return z.NEVER;
+      }
+      return parsed;
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Expected JSON array"
+      });
+      return z.NEVER;
+    }
+  })
+  .pipe(
+    z
+      .array(
+        z
+          .object({
+            walletAddress: walletAddressSchema,
+            wrappedAESKey: z.string().trim().min(1).max(20000),
+            wrappingMetadata: wrappingMetadataObjectSchema
+          })
+          .strict()
+      )
+      .min(1)
+      .max(100)
+  );
+
+const strongRevokeFinalizeBodySchema = z
+  .object({
+    expectedPreviousVersion: z
+      .string()
+      .regex(/^\d+$/)
+      .transform((value) => Number(value))
+      .pipe(z.number().int().min(1).max(Number.MAX_SAFE_INTEGER)),
+    newVersion: z
+      .string()
+      .regex(/^\d+$/)
+      .transform((value) => Number(value))
+      .pipe(z.number().int().min(2).max(Number.MAX_SAFE_INTEGER)),
+    sha256: sha256Schema,
+    encryptionMetadata: encryptionMetadataSchema,
+    wrappedKeys: wrappedKeySetSchema,
+    blockchainTransactionHash: z
+      .string()
+      .trim()
+      .regex(/^0x[a-fA-F0-9]{64}$/)
+      .transform((value) => value.toLowerCase()),
+    commitMessage: z.string().trim().max(500).optional()
+  })
+  .strict();
+
 const moveAssetFolderBodySchema = z
   .object({
     folderId: objectIdSchema.nullable()
@@ -484,6 +564,179 @@ async function loadAuthorizedEncryptedAsset(assetId: string, walletAddress: stri
   };
 }
 
+async function loadAuthorizedAssetIntegrity(assetId: string, walletAddress: string) {
+  const asset = await AssetModel.findOne({
+    _id: assetId,
+    status: { $in: ["ACTIVE", "active"] }
+  })
+    .select("_id ownerWallet filename blockchainAssetId blockchainVerificationStatus")
+    .lean();
+
+  if (!asset || !asset.blockchainAssetId || asset.blockchainVerificationStatus !== "verified") {
+    throw accessDenied();
+  }
+
+  const blockchain = createBlockchainReadService();
+  const [permission, currentVersion, currentHash] = await Promise.all([
+    blockchain.getPermission(asset.blockchainAssetId, walletAddress),
+    blockchain.getCurrentVersion(asset.blockchainAssetId),
+    blockchain.getCurrentHash(asset.blockchainAssetId)
+  ]).catch(() => {
+    throw accessDenied();
+  });
+
+  if (permission !== "READ" && permission !== "WRITE") {
+    throw accessDenied();
+  }
+
+  const blockchainSha256 = currentHash.startsWith("0x") ? currentHash.slice(2).toLowerCase() : currentHash.toLowerCase();
+  const assetVersion = await AssetVersionModel.findOne({
+    assetId: asset._id,
+    version: currentVersion,
+    sha256: blockchainSha256
+  })
+    .select("sha256 version -_id")
+    .lean();
+
+  if (!assetVersion) {
+    throw accessDenied();
+  }
+
+  return {
+    currentVersion,
+    expectedSha256: assetVersion.sha256.toLowerCase(),
+    blockchainSha256,
+    blockchainVerificationStatus: "verified" as const
+  };
+}
+
+async function currentAuthorizedWalletsForAsset(asset: {
+  _id: unknown;
+  ownerWallet: string;
+  blockchainAssetId: string;
+}) {
+  const ownerWallet = asset.ownerWallet.toLowerCase();
+  const now = new Date();
+  const activeGrants = await AccessGrantModel.find({
+    assetId: asset._id,
+    ownerWallet,
+    status: "ACTIVE",
+    $or: [{ validUntil: null }, { validUntil: { $gt: now } }]
+  })
+    .select("granteeWallet accessType")
+    .lean();
+
+  const blockchain = createBlockchainReadService();
+  const wallets = new Set<string>([ownerWallet]);
+  await Promise.all(
+    activeGrants.map(async (grant) => {
+      const permission = await blockchain.getPermission(asset.blockchainAssetId, grant.granteeWallet);
+      if (permission === "READ" || permission === "WRITE") {
+        wallets.add(grant.granteeWallet.toLowerCase());
+      }
+    })
+  );
+
+  return [...wallets].sort();
+}
+
+function assertSameWalletSet(actual: string[], expected: string[]) {
+  const normalizedActual = [...new Set(actual.map((wallet) => wallet.toLowerCase()))].sort();
+  const normalizedExpected = [...new Set(expected.map((wallet) => wallet.toLowerCase()))].sort();
+
+  if (
+    normalizedActual.length !== normalizedExpected.length ||
+    normalizedActual.some((wallet, index) => wallet !== normalizedExpected[index])
+  ) {
+    throw new HttpError(
+      400,
+      "WRAPPED_KEY_RECIPIENTS_MISMATCH",
+      "Wrapped-key recipients must match the currently authorized wallets"
+    );
+  }
+}
+
+function confirmationStateForBlockchainDetail(input: {
+  hasBlockchainAssetId: boolean;
+  blockchainVerificationStatus?: string | null;
+  status: string;
+  hasRegistrationBlock: boolean;
+}) {
+  if (!input.hasBlockchainAssetId || input.blockchainVerificationStatus === "pending") {
+    return "PENDING";
+  }
+
+  if (input.status === "BLOCKCHAIN_MISMATCH") {
+    return "MISMATCH";
+  }
+
+  if (input.blockchainVerificationStatus === "failed" || input.status === "BLOCKCHAIN_VERIFICATION_FAILED") {
+    return "FAILED";
+  }
+
+  if (input.blockchainVerificationStatus === "verified" && input.hasRegistrationBlock) {
+    return "CONFIRMED";
+  }
+
+  return "PENDING";
+}
+
+async function latestKnownChainTransaction(assetId: unknown) {
+  const [auditEvent, version] = await Promise.all([
+    AuditEventModel.findOne({
+      assetId,
+      action: { $in: ["ACCESS_GRANTED", "ACCESS_REVOKED", "VERSION_COMMITTED"] },
+      blockchainTxHash: { $type: "string" }
+    })
+      .sort({ timestamp: -1 })
+      .select("action detail blockchainTxHash timestamp -_id")
+      .lean(),
+    AssetVersionModel.findOne({
+      assetId,
+      blockchainTransactionHash: { $type: "string" }
+    })
+      .sort({ version: -1 })
+      .select("version blockchainTransactionHash updatedAt createdAt -_id")
+      .lean()
+  ]);
+
+  const versionTimestamp =
+    version && "updatedAt" in version && version.updatedAt instanceof Date
+      ? version.updatedAt
+      : version?.createdAt instanceof Date
+        ? version.createdAt
+        : null;
+  const versionCandidate = version?.blockchainTransactionHash
+    ? {
+        action: "VERSION_COMMITTED",
+        detail: `Version ${version.version} committed on-chain`,
+        blockchainTxHash: version.blockchainTransactionHash,
+        timestamp: versionTimestamp
+      }
+    : null;
+
+  const auditTimestamp = auditEvent?.timestamp instanceof Date ? auditEvent.timestamp : null;
+  if (auditEvent && (!versionCandidate || (auditTimestamp?.getTime() || 0) >= (versionCandidate.timestamp?.getTime() || 0))) {
+    return {
+      action: auditEvent.action,
+      detail: auditEvent.detail,
+      blockchainTxHash: auditEvent.blockchainTxHash || null,
+      timestamp: auditTimestamp ? auditTimestamp.toISOString() : null
+    };
+  }
+
+  if (versionCandidate) {
+    return {
+      action: versionCandidate.action,
+      detail: versionCandidate.detail,
+      blockchainTxHash: versionCandidate.blockchainTxHash,
+      timestamp: versionCandidate.timestamp ? versionCandidate.timestamp.toISOString() : null
+    };
+  }
+
+  return null;
+}
+
 async function safeBlockchainAssetDetail(asset: {
   _id: unknown;
   ownerWallet: string;
@@ -499,6 +752,7 @@ async function safeBlockchainAssetDetail(asset: {
   updatedAt?: Date;
 }) {
   const applicationAssetId = asset._id?.toString();
+  const latestKnownTransaction = await latestKnownChainTransaction(asset._id);
   const base = {
     assetId: applicationAssetId,
     filename: asset.filename,
@@ -510,6 +764,23 @@ async function safeBlockchainAssetDetail(asset: {
     blockNumber: typeof asset.registrationBlockNumber === "number" ? asset.registrationBlockNumber : null,
     status: asset.status,
     blockchainVerificationStatus: asset.blockchainVerificationStatus || "pending",
+    confirmationState: confirmationStateForBlockchainDetail({
+      hasBlockchainAssetId: !!asset.blockchainAssetId,
+      blockchainVerificationStatus: asset.blockchainVerificationStatus,
+      status: asset.status,
+      hasRegistrationBlock: typeof asset.registrationBlockNumber === "number"
+    }),
+    registration: {
+      transactionHash: asset.registrationTransactionHash || null,
+      blockNumber: typeof asset.registrationBlockNumber === "number" ? asset.registrationBlockNumber : null,
+      confirmed: asset.blockchainVerificationStatus === "verified" && typeof asset.registrationBlockNumber === "number"
+    },
+    current: {
+      ownerWallet: asset.ownerWallet,
+      hash: asset.sha256 ? `0x${asset.sha256.toLowerCase()}` : "",
+      version: asset.currentVersion
+    },
+    latestKnownTransaction,
     createdAt: asset.createdAt instanceof Date ? asset.createdAt.toISOString() : undefined,
     updatedAt: asset.updatedAt instanceof Date ? asset.updatedAt.toISOString() : undefined
   };
@@ -531,6 +802,11 @@ async function safeBlockchainAssetDetail(asset: {
       ownerWallet,
       currentHash,
       currentVersion,
+      current: {
+        ownerWallet,
+        hash: currentHash,
+        version: currentVersion
+      },
       status:
         ownerWallet === asset.ownerWallet.toLowerCase() &&
         currentHash === `0x${asset.sha256.toLowerCase()}` &&
@@ -542,13 +818,30 @@ async function safeBlockchainAssetDetail(asset: {
         currentHash === `0x${asset.sha256.toLowerCase()}` &&
         currentVersion === asset.currentVersion
           ? "verified"
-          : "failed"
+          : "failed",
+      confirmationState: confirmationStateForBlockchainDetail({
+        hasBlockchainAssetId: true,
+        blockchainVerificationStatus:
+          ownerWallet === asset.ownerWallet.toLowerCase() &&
+          currentHash === `0x${asset.sha256.toLowerCase()}` &&
+          currentVersion === asset.currentVersion
+            ? "verified"
+            : "failed",
+        status:
+          ownerWallet === asset.ownerWallet.toLowerCase() &&
+          currentHash === `0x${asset.sha256.toLowerCase()}` &&
+          currentVersion === asset.currentVersion
+            ? "VERIFIED"
+            : "BLOCKCHAIN_MISMATCH",
+        hasRegistrationBlock: typeof asset.registrationBlockNumber === "number"
+      })
     };
   } catch {
     return {
       ...base,
       status: "BLOCKCHAIN_VERIFICATION_FAILED",
-      blockchainVerificationStatus: "failed"
+      blockchainVerificationStatus: "failed",
+      confirmationState: "FAILED"
     };
   }
 }
@@ -827,6 +1120,12 @@ assetsRouter.post("/", requireAuth, singleEncryptedFile("encryptedFile"), async 
         fromFolderId: null,
         toFolderId: parsed.folderId ?? null
       });
+      await recordAuditEvent({
+        walletAddress: ownerWallet,
+        assetId: asset._id,
+        action: "ASSET_UPLOADED",
+        detail: `${parsed.filename} uploaded as encrypted asset`
+      });
 
       return res.status(201).json({
         asset: {
@@ -929,6 +1228,13 @@ assetsRouter.post("/:assetId/blockchain-sync", requireAuth, async (req, res, nex
     if (!updatedAsset) {
       throw new HttpError(409, "BLOCKCHAIN_TRANSACTION_ALREADY_USED", "Blockchain transaction is already linked");
     }
+    await recordAuditEvent({
+      walletAddress: ownerWallet,
+      assetId: updatedAsset._id,
+      action: "BLOCKCHAIN_REGISTERED",
+      detail: `${updatedAsset.filename} registered on-chain`,
+      blockchainTxHash: verified.transactionHash
+    });
 
     return res.json({
       asset: safeAssetSummary(updatedAsset)
@@ -1094,6 +1400,13 @@ assetsRouter.post("/:assetId/access/grant-sync", requireAuth, async (req, res, n
       fromFolderId: null,
       toFolderId: null
     });
+    await recordAuditEvent({
+      walletAddress: ownerWallet,
+      assetId: asset._id,
+      action: "ACCESS_GRANTED",
+      detail: `${asset.filename} access granted to ${verifiedGrant.granteeWallet}`,
+      blockchainTxHash: verifiedGrant.transactionHash
+    });
 
     return res.status(201).json({
       accessGrant: {
@@ -1112,6 +1425,431 @@ assetsRouter.post("/:assetId/access/grant-sync", requireAuth, async (req, res, n
       }
     });
   } catch (error) {
+    if (error instanceof BlockchainVerificationError) {
+      return next(new HttpError(400, error.code, error.message));
+    }
+
+    return next(error);
+  }
+});
+
+assetsRouter.post("/:assetId/access/revoke-sync", requireAuth, async (req, res, next) => {
+  try {
+    if (!req.auth) {
+      return res.status(401).json({
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Authentication required"
+        }
+      });
+    }
+
+    const parsedParams = grantAccessSyncParamsSchema.parse(req.params);
+    const parsedBody = revokeAccessSyncBodySchema.parse(req.body);
+    const ownerWallet = req.auth.walletAddress.toLowerCase();
+
+    const asset = await AssetModel.findOne({ _id: parsedParams.assetId, ownerWallet })
+      .select("_id ownerWallet filename blockchainAssetId blockchainVerificationStatus status")
+      .lean();
+
+    if (!asset) {
+      throw new HttpError(404, "ASSET_NOT_FOUND", "Asset not found");
+    }
+
+    if (!asset.blockchainAssetId || asset.blockchainVerificationStatus !== "verified") {
+      throw new HttpError(409, "ASSET_NOT_REGISTERED_ON_CHAIN", "Asset must be registered on-chain before revoking access");
+    }
+
+    const replayedGrantTx = await AccessGrantModel.findOne({
+      blockchainTxHash: parsedBody.blockchainTransactionHash
+    })
+      .select("_id")
+      .lean();
+    const replayedRevokeTx = await AuditEventModel.findOne({
+      blockchainTxHash: parsedBody.blockchainTransactionHash
+    })
+      .select("_id")
+      .lean();
+
+    if (replayedGrantTx || replayedRevokeTx) {
+      throw new HttpError(409, "BLOCKCHAIN_TRANSACTION_ALREADY_USED", "Blockchain transaction is already linked to an access change");
+    }
+
+    const blockchain = createBlockchainReadService();
+    const blockchainOwner = await blockchain.getAssetOwner(asset.blockchainAssetId);
+    if (blockchainOwner.toLowerCase() !== ownerWallet) {
+      throw new HttpError(403, "ASSET_ACCESS_DENIED", "Asset owner could not be verified on-chain");
+    }
+
+    const verifiedRevoke = await blockchain.verifyAccessRevoke({
+      transactionHash: parsedBody.blockchainTransactionHash,
+      blockchainAssetId: asset.blockchainAssetId,
+      expectedOwnerWallet: ownerWallet,
+      expectedGranteeWallet: parsedBody.granteeWallet
+    });
+    const currentPermission = await blockchain.getPermission(asset.blockchainAssetId, verifiedRevoke.granteeWallet);
+    if (currentPermission !== "NONE") {
+      throw new HttpError(400, "BLOCKCHAIN_VERIFICATION_FAILED", "Revoked wallet still has on-chain access");
+    }
+
+    const revokedAt = new Date();
+    await AccessGrantModel.updateMany(
+      {
+        assetId: asset._id,
+        ownerWallet,
+        granteeWallet: verifiedRevoke.granteeWallet,
+        status: "ACTIVE"
+      },
+      {
+        $set: {
+          status: "REVOKED",
+          revokedAt
+        }
+      }
+    );
+
+    await WrappedKeyModel.updateMany(
+      {
+        assetId: asset._id,
+        userWallet: verifiedRevoke.granteeWallet,
+        active: true
+      },
+      {
+        $set: {
+          active: false
+        }
+      }
+    );
+
+    await AssetAuditEventModel.create({
+      assetId: asset._id,
+      ownerWallet,
+      actorWallet: ownerWallet,
+      eventType: "ASSET_ACCESS_REVOKED",
+      fromFolderId: null,
+      toFolderId: null
+    });
+    await recordAuditEvent({
+      walletAddress: ownerWallet,
+      assetId: asset._id,
+      action: "ACCESS_REVOKED",
+      detail: `${asset.filename} access revoked for ${verifiedRevoke.granteeWallet}`,
+      blockchainTxHash: verifiedRevoke.transactionHash
+    });
+
+    return res.json({
+      revokedAccess: {
+        assetId: asset._id.toString(),
+        ownerWallet,
+        granteeWallet: verifiedRevoke.granteeWallet,
+        blockchainTxHash: verifiedRevoke.transactionHash,
+        blockNumber: verifiedRevoke.blockNumber,
+        status: "REVOKED",
+        revokedAt: revokedAt.toISOString()
+      }
+    });
+  } catch (error) {
+    if (error instanceof BlockchainVerificationError) {
+      return next(new HttpError(400, error.code, error.message));
+    }
+
+    return next(error);
+  }
+});
+
+assetsRouter.post("/:assetId/access/strong-revoke/prepare", requireAuth, async (req, res, next) => {
+  try {
+    if (!req.auth) {
+      return res.status(401).json({
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Authentication required"
+        }
+      });
+    }
+
+    const parsedParams = grantAccessSyncParamsSchema.parse(req.params);
+    const parsedBody = strongRevokePrepareBodySchema.parse(req.body);
+    const ownerWallet = req.auth.walletAddress.toLowerCase();
+
+    const asset = await AssetModel.findOne({ _id: parsedParams.assetId, ownerWallet })
+      .select("_id ownerWallet filename sha256 currentVersion blockchainAssetId blockchainVerificationStatus passwordProtectionEnabled status")
+      .lean();
+
+    if (!asset) {
+      throw new HttpError(404, "ASSET_NOT_FOUND", "Asset not found");
+    }
+
+    if (!asset.blockchainAssetId || asset.blockchainVerificationStatus !== "verified") {
+      throw new HttpError(409, "ASSET_NOT_REGISTERED_ON_CHAIN", "Asset must be registered on-chain before strong revocation");
+    }
+
+    const blockchain = createBlockchainReadService();
+    const [blockchainOwner, revokedPermission, currentVersion, currentHash] = await Promise.all([
+      blockchain.getAssetOwner(asset.blockchainAssetId),
+      blockchain.getPermission(asset.blockchainAssetId, parsedBody.granteeWallet),
+      blockchain.getCurrentVersion(asset.blockchainAssetId),
+      blockchain.getCurrentHash(asset.blockchainAssetId)
+    ]);
+
+    if (blockchainOwner.toLowerCase() !== ownerWallet) {
+      throw new HttpError(403, "ASSET_ACCESS_DENIED", "Asset owner could not be verified on-chain");
+    }
+    if (revokedPermission !== "NONE") {
+      throw new HttpError(409, "REVOKE_SYNC_REQUIRED", "Target grantee must be revoked on-chain before strong revocation");
+    }
+
+    const blockchainSha256 = currentHash.startsWith("0x") ? currentHash.slice(2).toLowerCase() : currentHash.toLowerCase();
+    if (currentVersion !== asset.currentVersion || blockchainSha256 !== asset.sha256.toLowerCase()) {
+      throw new HttpError(409, "ASSET_VERSION_OUT_OF_SYNC", "Stored asset version does not match the blockchain current version");
+    }
+
+    const authorizedWallets = (await currentAuthorizedWalletsForAsset({
+      _id: asset._id,
+      ownerWallet,
+      blockchainAssetId: asset.blockchainAssetId
+    })).filter((wallet) => wallet !== parsedBody.granteeWallet);
+
+    const users = await UserModel.find({ walletAddress: { $in: authorizedWallets } })
+      .select("walletAddress publicEncryptionKey -_id")
+      .lean();
+    const publicKeyByWallet = new Map(users.map((user) => [user.walletAddress.toLowerCase(), user.publicEncryptionKey || null]));
+    const missingPublicKeyWallets = authorizedWallets.filter(
+      (wallet) => wallet !== ownerWallet || !asset.passwordProtectionEnabled
+    ).filter((wallet) => !publicKeyByWallet.get(wallet));
+
+    if (missingPublicKeyWallets.length) {
+      throw new HttpError(409, "PUBLIC_ENCRYPTION_KEY_REQUIRED", "Every remaining authorized wallet must have a public encryption key");
+    }
+
+    return res.json({
+      strongRevoke: {
+        assetId: asset._id.toString(),
+        filename: asset.filename,
+        currentVersion,
+        nextVersion: currentVersion + 1,
+        expectedSha256: asset.sha256.toLowerCase(),
+        revokedGranteeWallet: parsedBody.granteeWallet,
+        passwordProtectionEnabled: asset.passwordProtectionEnabled === true,
+        recipients: authorizedWallets.map((wallet) => ({
+          walletAddress: wallet,
+          publicEncryptionKey: publicKeyByWallet.get(wallet) || null,
+          requiresPasswordWrapping: wallet === ownerWallet && asset.passwordProtectionEnabled === true
+        }))
+      }
+    });
+  } catch (error) {
+    if (error instanceof BlockchainVerificationError) {
+      return next(new HttpError(400, error.code, error.message));
+    }
+
+    return next(error);
+  }
+});
+
+assetsRouter.post("/:assetId/access/strong-revoke/finalize", requireAuth, upload.single("encryptedFile"), async (req, res, next) => {
+  let stored: Awaited<ReturnType<typeof storeEncryptedAsset>> | null = null;
+  try {
+    if (!req.auth) {
+      return res.status(401).json({
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Authentication required"
+        }
+      });
+    }
+
+    const parsedParams = grantAccessSyncParamsSchema.parse(req.params);
+    const parsedBody = strongRevokeFinalizeBodySchema.parse(req.body);
+    const ownerWallet = req.auth.walletAddress.toLowerCase();
+
+    if (!req.file) {
+      throw new HttpError(400, "ENCRYPTED_FILE_REQUIRED", "Encrypted file is required");
+    }
+    if (req.file.mimetype !== "application/octet-stream") {
+      throw new HttpError(400, "INVALID_ENCRYPTED_FILE", "Encrypted file must be application/octet-stream");
+    }
+    if (parsedBody.newVersion !== parsedBody.expectedPreviousVersion + 1) {
+      throw new HttpError(400, "INVALID_VERSION_SEQUENCE", "New version must immediately follow the previous version");
+    }
+
+    const asset = await AssetModel.findOne({ _id: parsedParams.assetId, ownerWallet })
+      .select("_id ownerWallet filename size mimeType sha256 currentVersion blockchainAssetId blockchainVerificationStatus passwordProtectionEnabled status")
+      .lean();
+
+    if (!asset) {
+      throw new HttpError(404, "ASSET_NOT_FOUND", "Asset not found");
+    }
+    if (!asset.blockchainAssetId || asset.blockchainVerificationStatus !== "verified") {
+      throw new HttpError(409, "ASSET_NOT_REGISTERED_ON_CHAIN", "Asset must be registered on-chain before strong revocation");
+    }
+    if (asset.currentVersion !== parsedBody.expectedPreviousVersion) {
+      throw new HttpError(409, "ASSET_VERSION_OUT_OF_SYNC", "Asset current version changed before strong revocation finalized");
+    }
+
+    const replayedVersionTx = await AssetVersionModel.findOne({
+      blockchainTransactionHash: parsedBody.blockchainTransactionHash
+    })
+      .select("_id")
+      .lean();
+    const replayedAuditTx = await AuditEventModel.findOne({
+      blockchainTxHash: parsedBody.blockchainTransactionHash
+    })
+      .select("_id")
+      .lean();
+    if (replayedVersionTx || replayedAuditTx) {
+      throw new HttpError(409, "BLOCKCHAIN_TRANSACTION_ALREADY_USED", "Blockchain transaction is already linked to a version update");
+    }
+
+    const blockchain = createBlockchainReadService();
+    const blockchainOwner = await blockchain.getAssetOwner(asset.blockchainAssetId);
+    if (blockchainOwner.toLowerCase() !== ownerWallet) {
+      throw new HttpError(403, "ASSET_ACCESS_DENIED", "Asset owner could not be verified on-chain");
+    }
+    const verifiedCommit = await blockchain.verifyVersionCommit({
+      transactionHash: parsedBody.blockchainTransactionHash,
+      blockchainAssetId: asset.blockchainAssetId,
+      expectedCommitterWallet: ownerWallet,
+      expectedSha256: parsedBody.sha256,
+      expectedVersion: parsedBody.newVersion
+    });
+
+    const authorizedWallets = await currentAuthorizedWalletsForAsset({
+      _id: asset._id,
+      ownerWallet,
+      blockchainAssetId: asset.blockchainAssetId
+    });
+    assertSameWalletSet(
+      parsedBody.wrappedKeys.map((key) => key.walletAddress),
+      authorizedWallets
+    );
+
+    stored = await storeEncryptedAsset({
+      encryptedBytes: req.file.buffer,
+      originalFilename: asset.filename
+    });
+
+    const createVersionDoc = {
+      assetId: asset._id,
+      version: verifiedCommit.version,
+      encryptedStorageReference: stored.storageId,
+      encryptionMetadata: parsedBody.encryptionMetadata,
+      sha256: verifiedCommit.sha256,
+      createdBy: ownerWallet,
+      commitMessage: parsedBody.commitMessage || "Strong revocation key rotation",
+      blockchainTransactionHash: verifiedCommit.transactionHash
+    };
+    const newWrappedKeyDocs = parsedBody.wrappedKeys.map((key) => ({
+      assetId: asset._id,
+      userWallet: key.walletAddress,
+      wrappedAESKey: key.wrappedAESKey,
+      version: verifiedCommit.version,
+      wrappingMetadata: key.wrappingMetadata,
+      active: true
+    }));
+
+    const runDbSwitch = async (session?: mongoose.ClientSession) => {
+      if (session) {
+        await AssetVersionModel.create([createVersionDoc], { session });
+      } else {
+        await AssetVersionModel.create(createVersionDoc);
+      }
+      await WrappedKeyModel.updateMany(
+        {
+          assetId: asset._id,
+          version: asset.currentVersion,
+          active: true
+        },
+        {
+          $set: {
+            active: false
+          }
+        },
+        session ? { session } : undefined
+      );
+      if (session) {
+        await WrappedKeyModel.create(newWrappedKeyDocs, { session });
+      } else {
+        await WrappedKeyModel.create(newWrappedKeyDocs);
+      }
+      const updatedAsset = await AssetModel.findOneAndUpdate(
+        {
+          _id: asset._id,
+          ownerWallet,
+          currentVersion: parsedBody.expectedPreviousVersion
+        },
+        {
+          $set: {
+            currentVersion: verifiedCommit.version,
+            sha256: verifiedCommit.sha256,
+            status: "ACTIVE",
+            blockchainVerificationStatus: "verified"
+          }
+        },
+        {
+          new: true,
+          runValidators: true,
+          ...(session ? { session } : {})
+        }
+      );
+      if (!updatedAsset) {
+        throw new HttpError(409, "ASSET_VERSION_OUT_OF_SYNC", "Asset current version changed before strong revocation finalized");
+      }
+      const assetAuditEvent = {
+        assetId: asset._id,
+        ownerWallet,
+        actorWallet: ownerWallet,
+        eventType: "ASSET_STRONG_REVOKE_COMPLETED",
+        fromFolderId: null,
+        toFolderId: null
+      };
+      if (session) {
+        await AssetAuditEventModel.create([assetAuditEvent], { session });
+      } else {
+        await AssetAuditEventModel.create(assetAuditEvent);
+      }
+    };
+
+    if (mongoose.connection.readyState === 1) {
+      const session = await mongoose.startSession();
+      try {
+        await session.withTransaction(() => runDbSwitch(session));
+      } finally {
+        await session.endSession();
+      }
+    } else {
+      await runDbSwitch();
+    }
+
+    await recordAuditEvent({
+      walletAddress: ownerWallet,
+      assetId: asset._id,
+      action: "VERSION_COMMITTED",
+      detail: `${asset.filename} version ${verifiedCommit.version} committed after strong revocation`,
+      blockchainTxHash: verifiedCommit.transactionHash
+    });
+    await recordAuditEvent({
+      walletAddress: ownerWallet,
+      assetId: asset._id,
+      action: "STRONG_REVOKE_COMPLETED",
+      detail: `${asset.filename} current key set rotated for authorized users`
+    });
+
+    stored = null;
+    return res.json({
+      version: {
+        assetId: asset._id.toString(),
+        version: verifiedCommit.version,
+        sha256: verifiedCommit.sha256,
+        blockchainTxHash: verifiedCommit.transactionHash,
+        blockNumber: verifiedCommit.blockNumber,
+        wrappedKeyRecipients: authorizedWallets
+      }
+    });
+  } catch (error) {
+    if (stored) {
+      await deleteEncryptedAsset(stored.storageId).catch(() => undefined);
+    }
     if (error instanceof BlockchainVerificationError) {
       return next(new HttpError(400, error.code, error.message));
     }
@@ -1178,6 +1916,12 @@ assetsRouter.patch("/:assetId/folder", requireAuth, async (req, res, next) => {
       fromFolderId: previousFolderId,
       toFolderId: parsedBody.folderId
     });
+    await recordAuditEvent({
+      walletAddress: ownerWallet,
+      assetId: updatedAsset._id,
+      action: "DOCUMENT_MOVED",
+      detail: `${updatedAsset.filename} moved`
+    });
 
     return res.json({
       asset: safeAssetFolder(updatedAsset)
@@ -1231,6 +1975,63 @@ assetsRouter.get("/:assetId/blockchain", requireAuth, async (req, res, next) => 
   }
 });
 
+assetsRouter.get("/:assetId/integrity", requireAuth, async (req, res, next) => {
+  try {
+    if (!req.auth) {
+      return res.status(401).json({
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Authentication required"
+        }
+      });
+    }
+
+    const parsedParams = moveAssetFolderParamsSchema.parse(req.params);
+    const walletAddress = req.auth.walletAddress.toLowerCase();
+    const integrity = await loadAuthorizedAssetIntegrity(parsedParams.assetId, walletAddress);
+
+    return res.json({
+      integrity: {
+        currentVersion: integrity.currentVersion,
+        expectedSha256: integrity.expectedSha256,
+        blockchainSha256: integrity.blockchainSha256,
+        blockchainVerificationStatus: integrity.blockchainVerificationStatus
+      }
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+assetsRouter.get("/:assetId/activity", requireAuth, async (req, res, next) => {
+  try {
+    if (!req.auth) {
+      return res.status(401).json({
+        error: {
+          code: "AUTH_REQUIRED",
+          message: "Authentication required"
+        }
+      });
+    }
+
+    const parsedParams = moveAssetFolderParamsSchema.parse(req.params);
+    const walletAddress = req.auth.walletAddress.toLowerCase();
+    await loadAuthorizedAssetIntegrity(parsedParams.assetId, walletAddress);
+
+    const events = await AuditEventModel.find({ assetId: parsedParams.assetId })
+      .sort({ timestamp: -1 })
+      .limit(100)
+      .select("walletAddress assetId action detail blockchainTxHash timestamp")
+      .lean();
+
+    return res.json({
+      activity: events.map(safeAuditEvent)
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 assetsRouter.get("/:assetId/open", requireAuth, async (req, res, next) => {
   try {
     if (!req.auth) {
@@ -1248,6 +2049,12 @@ assetsRouter.get("/:assetId/open", requireAuth, async (req, res, next) => {
       parsedParams.assetId,
       walletAddress
     );
+    await recordAuditEvent({
+      walletAddress,
+      assetId: asset._id,
+      action: "ASSET_OPENED",
+      detail: `${asset.filename} opened after access verification`
+    });
 
     return res.json({
       asset: {

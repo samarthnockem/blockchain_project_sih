@@ -11,6 +11,7 @@ import {
 import { logSecurityEvent } from "../config/logger.js";
 import { authLimiter } from "../middleware/rate-limit.js";
 import { requireAuth } from "../middleware/require-auth.js";
+import { recordAuditEvent } from "../services/audit-events.js";
 import { validateRequest } from "../middleware/validate-request.js";
 
 const verifyBodySchema = z
@@ -35,7 +36,7 @@ authRouter.get("/challenge", (_req, res) => {
   });
 });
 
-authRouter.post("/verify", validateRequest({ body: verifyBodySchema }), (req, res) => {
+authRouter.post("/verify", validateRequest({ body: verifyBodySchema }), async (req, res, next) => {
   const { message, nonce, signature } = req.body as z.infer<typeof verifyBodySchema>;
   const challenge = consumeChallenge(nonce, message);
 
@@ -62,9 +63,18 @@ authRouter.post("/verify", validateRequest({ body: verifyBodySchema }), (req, re
     });
   }
 
+  try {
+    await recordAuditEvent({
+      walletAddress,
+      action: "WALLET_AUTHENTICATED",
+      detail: "Wallet authenticated"
+    });
+  } catch (error) {
+    return next(error);
+  }
+
   const sessionId = createSession(walletAddress);
   res.setHeader("set-cookie", buildSessionCookie(sessionId));
-
   return res.json({
     authenticated: true,
     walletAddress
