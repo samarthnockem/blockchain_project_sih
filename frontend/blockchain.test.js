@@ -5,6 +5,8 @@ const vm = require("node:vm");
 
 const blockchainSource = fs.readFileSync(path.join(__dirname, "blockchain.js"), "utf8");
 const appSource = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+const serverSource = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+const runtimeConfigSource = fs.readFileSync(path.join(__dirname, "runtime-config.js"), "utf8");
 
 assert(blockchainSource.includes("wallet_switchEthereumChain"), "blockchain helper must switch MetaMask networks");
 assert(blockchainSource.includes("wallet_addEthereumChain"), "blockchain helper must add unknown configured networks");
@@ -38,6 +40,23 @@ assert(appSource.includes("getSelectedMetaMaskAccount"), "Authentication must co
 assert(appSource.includes("assertAuthenticatedWalletMatches"), "Authentication must verify backend session and selected wallet match");
 assert(appSource.includes("if (walletEventsRegistered) return"), "MetaMask account listeners must not be registered repeatedly");
 assert(!appSource.includes("location.reload("), "Account switching must not use browser reload");
+assert(appSource.includes("/api/security-policy"), "Real mode must read security policy from the backend");
+assert(appSource.includes("function requiresWalletForBlockchainActions"), "Wallet-before-blockchain policy must be derived, not stored as a real-mode preference");
+assert(appSource.includes("return isRealModeEnabled() || state.securityPolicy?.requireWalletForBlockchainActions !== false"), "Wallet-before-blockchain must stay enforced in real mode");
+assert(appSource.includes("requireWallet.disabled = isRealModeEnabled()"), "Wallet policy control must be locked in real mode");
+assert(appSource.includes("requireKyc.disabled = isRealModeEnabled()"), "KYC policy control must be locked to backend policy in real mode");
+assert(appSource.includes("state.settings.showProgress = e.target.checked"), "Upload security progress may remain a local frontend preference");
+assert(runtimeConfigSource.includes('window.KRYPTO_APP_MODE = "REAL_MODE"'), "Static runtime config must default to REAL_MODE");
+assert(runtimeConfigSource.includes("window.KRYPTO_ALLOW_DEMO_MODE = false"), "Static runtime config must not allow demo mode by default");
+assert(serverSource.includes('REQUESTED_MODE === "DEMO_MODE"'), "DEMO_MODE must require explicit frontend server configuration");
+assert(serverSource.includes('SERVER_ENV !== "production"'), "Production server mode must not enable DEMO_MODE");
+assert(appSource.includes('return window.KRYPTO_ALLOW_DEMO_MODE === true && window.KRYPTO_APP_MODE === "DEMO_MODE"'), "Demo behavior must require explicit runtime config");
+assert(!appSource.includes("location.search"), "Demo mode must not be enabled through query parameters");
+assert(!appSource.includes("URLSearchParams"), "Demo mode must not be enabled through query parameters");
+assert(appSource.includes("seedDemoBtn.hidden = !demoMode"), "Restore Demo Data must be hidden outside DEMO_MODE");
+assert(appSource.includes("resetAllBtn.hidden = !demoMode"), "Reset Entire Workspace must be hidden outside DEMO_MODE");
+assert(appSource.includes("Restore Demo Data is available only when DEMO_MODE is explicitly enabled in development."), "Restore Demo Data handler must fail closed in REAL_MODE");
+assert(appSource.includes("Reset Entire Workspace is disabled in REAL_MODE."), "Reset Entire Workspace handler must fail closed in REAL_MODE");
 assert(appSource.includes("Registration Transaction"), "Document Blockchain tab must show the registration transaction");
 assert(appSource.includes("Current Hash"), "Document Blockchain tab must show the current chain hash");
 assert(appSource.includes("Latest Chain Action"), "Document Blockchain tab must show the latest known grant, revoke, or version action");

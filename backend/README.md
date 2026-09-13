@@ -52,6 +52,7 @@ Copy `.env.example` to `.env` for local development. Do not commit `.env`.
 - `GET /api/users/:wallet/public-key` returns a user's public encryption key.
 - `GET /api/kyc/status` returns safe mock KYC metadata for the authenticated session wallet.
 - `POST /api/kyc/mock-verify` is demo-only mock KYC. It stores status metadata only and does not accept identity documents or identity numbers.
+- `GET /api/security-policy` returns safe policy booleans for frontend display. Wallet authorization for blockchain actions is always required in real mode; KYC-before-sharing is controlled by `REQUIRE_KYC_BEFORE_SHARING`.
 
 ## Current Scope
 
@@ -71,7 +72,7 @@ Password-protected uploads use client-side PBKDF2-SHA-256 plus AES-256-GCM to wr
 
 Blockchain reads are available through a backend service abstraction configured by `BLOCKCHAIN_RPC_URL`, `CONTRACT_ADDRESS`, and `CHAIN_ID`. The service creates a read-only ethers provider/contract, never creates a signing wallet, never signs transactions, and fails closed when ownership, permission, hash, or version verification cannot be completed. Blockchain-changing actions must be signed by the user with MetaMask.
 
-Access grant sync is metadata-only. The frontend signs `grantAccess` with MetaMask, wraps the document AES key for the grantee locally, and then sends the transaction hash plus wrapped grantee key to `POST /api/assets/:assetId/access/grant-sync`. The backend verifies the on-chain owner and `AccessGranted` event before storing `AccessGrant`, `WrappedKey`, and an activity event. `AccessGrant` is not authoritative for access decisions; blockchain permissions remain authoritative.
+Access grant sync is metadata-only. The frontend signs `grantAccess` with MetaMask, wraps the document AES key for the grantee locally, and then sends the transaction hash plus wrapped grantee key to `POST /api/assets/:assetId/access/grant-sync`. The backend verifies the on-chain owner and `AccessGranted` event before storing `AccessGrant`, `WrappedKey`, and an activity event. `AccessGrant` is not authoritative for access decisions; blockchain permissions remain authoritative. If `REQUIRE_KYC_BEFORE_SHARING=true`, the backend also requires the authenticated owner's stored KYC status to be `VERIFIED` before syncing a grant.
 
 Reusable asset authorization helpers enforce owner, read, and write checks from blockchain state only. MongoDB permission fields are not trusted for authorization decisions.
 

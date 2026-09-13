@@ -17,6 +17,7 @@ import { assetsRouter } from "./routes/assets.js";
 import { foldersRouter } from "./routes/folders.js";
 import { kycRouter } from "./routes/kyc.js";
 import { blockchainRouter } from "./routes/blockchain.js";
+import { securityPolicyRouter } from "./routes/security-policy.js";
 
 export function createApp() {
   const app = express();
@@ -41,6 +42,7 @@ export function createApp() {
   app.use("/api/folders", foldersRouter);
   app.use("/api/blockchain", blockchainRouter);
   app.use("/api/kyc", kycRouter);
+  app.use("/api/security-policy", securityPolicyRouter);
   app.use("/api/health", healthRouter);
   app.use("/api/ready", readyRouter);
   app.use("/api/users", usersRouter);

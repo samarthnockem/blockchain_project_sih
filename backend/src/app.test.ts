@@ -71,6 +71,19 @@ describe("backend security baseline", () => {
     });
   });
 
+  it("exposes safe security policy controls without client override state", async () => {
+    const response = await request(createApp()).get("/api/security-policy").expect(200);
+
+    expect(response.body).toEqual({
+      requireWalletForBlockchainActions: true,
+      requireKycBeforeSharing: false,
+      sources: {
+        requireWalletForBlockchainActions: "application",
+        requireKycBeforeSharing: "backend"
+      }
+    });
+  });
+
   it("reports when database is not ready", async () => {
     vi.spyOn(database, "isDatabaseReady").mockReturnValue(false);
 

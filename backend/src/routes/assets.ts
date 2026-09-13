@@ -1344,6 +1344,13 @@ assetsRouter.post("/:assetId/access/grant-sync", requireAuth, async (req, res, n
       throw new HttpError(409, "ASSET_NOT_REGISTERED_ON_CHAIN", "Asset must be registered on-chain before granting access");
     }
 
+    if (env.REQUIRE_KYC_BEFORE_SHARING) {
+      const ownerProfile = await UserModel.findOne({ walletAddress: ownerWallet }).select("kycStatus").lean();
+      if (ownerProfile?.kycStatus !== "VERIFIED") {
+        throw new HttpError(403, "KYC_REQUIRED", "KYC verification is required before sharing assets");
+      }
+    }
+
     const existingGrant = await AccessGrantModel.findOne({
       blockchainTxHash: parsedBody.blockchainTransactionHash
     })

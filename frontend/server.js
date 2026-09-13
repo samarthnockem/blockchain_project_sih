@@ -5,6 +5,9 @@ const { extname, isAbsolute, join, normalize, relative, resolve } = require("nod
 
 const PORT = Number(process.env.PORT || 8000);
 const ROOT = resolve(process.cwd());
+const SERVER_ENV = String(process.env.NODE_ENV || "development").trim().toLowerCase();
+const REQUESTED_MODE = String(process.env.KRYPTO_FRONTEND_MODE || process.env.FRONTEND_MODE || "REAL_MODE").trim().toUpperCase();
+const RUNTIME_MODE = SERVER_ENV !== "production" && REQUESTED_MODE === "DEMO_MODE" ? "DEMO_MODE" : "REAL_MODE";
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -34,6 +37,18 @@ function resolveRequestPath(urlPath) {
 
 createServer(async (req, res) => {
   try {
+    if ((req.url || "").split("?")[0] === "/runtime-config.js") {
+      res.writeHead(200, {
+        "Cache-Control": "no-store",
+        "Content-Type": "text/javascript; charset=utf-8"
+      });
+      res.end(
+        `window.KRYPTO_APP_MODE=${JSON.stringify(RUNTIME_MODE)};\n` +
+        `window.KRYPTO_ALLOW_DEMO_MODE=${JSON.stringify(RUNTIME_MODE === "DEMO_MODE")};\n`
+      );
+      return;
+    }
+
     const filePath = resolveRequestPath(req.url || "/");
     if (!filePath) {
       res.writeHead(403);
@@ -58,5 +73,5 @@ createServer(async (req, res) => {
     res.end("Not found");
   }
 }).listen(PORT, () => {
-  console.log(`KryptoVault frontend running at http://localhost:${PORT}`);
+  console.log(`KryptoVault frontend running at http://localhost:${PORT} in ${RUNTIME_MODE}`);
 });

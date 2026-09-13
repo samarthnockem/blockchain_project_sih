@@ -9,6 +9,7 @@ const assetRegistryAbi = [
   "event AccessGranted(uint256 indexed assetId, address indexed owner, address indexed grantee, uint8 permission, uint64 validFrom, uint64 validUntil)",
   "event AccessRevoked(uint256 indexed assetId, address indexed owner, address indexed grantee)",
   "event VersionCommitted(uint256 indexed assetId, address indexed committer, bytes32 sha256Hash, uint256 version)",
+  "function grantAccess(uint256 assetId, address grantee, uint8 permission, uint64 validFrom, uint64 validUntil)",
   "function ownerOf(uint256 assetId) view returns (address)",
   "function getPermission(uint256 assetId, address wallet) view returns (uint8)",
   "function currentHashOf(uint256 assetId) view returns (bytes32)",
@@ -20,6 +21,11 @@ type BlockchainProvider = {
     chainId: bigint;
   }>;
   getCode?(address: string): Promise<string>;
+  getTransaction?(transactionHash: string): Promise<{
+    data?: string;
+    from?: string;
+    to?: string | null;
+  } | null>;
   getTransactionReceipt?(transactionHash: string): Promise<BlockchainTransactionReceipt | null>;
 };
 
@@ -420,7 +426,31 @@ export function createBlockchainReadService(options: BlockchainReadServiceOption
         }
 
         const contractInterface = new Interface(assetRegistryAbi);
-        const grantedEvent = receipt.logs
+        const transaction = provider.getTransaction ? await provider.getTransaction(transactionHash) : null;
+        if (transaction?.data && transaction.data !== "0x") {
+          const parsedTransaction = contractInterface.parseTransaction({ data: transaction.data });
+          if (!parsedTransaction || parsedTransaction.name !== "grantAccess") {
+            throw new BlockchainVerificationError("Access grant transaction did not call grantAccess");
+          }
+
+          const txAssetId = normalizeAssetId(parsedTransaction.args.assetId);
+          const txGrantee = normalizeWallet(parsedTransaction.args.grantee).toLowerCase();
+          const txPermission = Number(parsedTransaction.args.permission);
+          const txValidFrom = Number(parsedTransaction.args.validFrom);
+          const txValidUntil = Number(parsedTransaction.args.validUntil);
+
+          if (
+            txAssetId !== expectedAssetId ||
+            txGrantee !== expectedGrantee ||
+            txPermission !== expectedPermission ||
+            txValidFrom !== input.expectedValidFrom ||
+            txValidUntil !== input.expectedValidUntil
+          ) {
+            throw new BlockchainVerificationError("Access grant transaction input did not match the expected grant");
+          }
+        }
+
+        const grantedEvents = receipt.logs
           .filter((log) => normalizeWallet(log.address).toLowerCase() === normalizeWallet(contractAddress).toLowerCase())
           .map((log) => {
             try {
@@ -432,10 +462,31 @@ export function createBlockchainReadService(options: BlockchainReadServiceOption
               return null;
             }
           })
-          .find((event) => event?.name === "AccessGranted");
+          .filter((event) => event?.name === "AccessGranted");
+
+        const grantedEvent = grantedEvents.find((event) => {
+          if (!event) return false;
+
+          try {
+            return (
+              normalizeAssetId(event.args.assetId) === expectedAssetId &&
+              normalizeWallet(event.args.owner).toLowerCase() === expectedOwner &&
+              normalizeWallet(event.args.grantee).toLowerCase() === expectedGrantee &&
+              Number(event.args.permission) === expectedPermission &&
+              Number(event.args.validFrom) === input.expectedValidFrom &&
+              Number(event.args.validUntil) === input.expectedValidUntil
+            );
+          } catch {
+            return false;
+          }
+        });
 
         if (!grantedEvent) {
-          throw new BlockchainVerificationError("AccessGranted event was not found");
+          throw new BlockchainVerificationError(
+            grantedEvents.length
+              ? "AccessGranted event for the expected grant was not found"
+              : "AccessGranted event was not found"
+          );
         }
 
         const eventAssetId = normalizeAssetId(grantedEvent.args.assetId);

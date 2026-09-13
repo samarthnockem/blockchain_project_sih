@@ -14,6 +14,9 @@ const assetRegisteredInterface = new Interface([
 const accessGrantedInterface = new Interface([
   "event AccessGranted(uint256 indexed assetId, address indexed owner, address indexed grantee, uint8 permission, uint64 validFrom, uint64 validUntil)"
 ]);
+const grantAccessInterface = new Interface([
+  "function grantAccess(uint256 assetId, address grantee, uint8 permission, uint64 validFrom, uint64 validUntil)"
+]);
 const accessRevokedInterface = new Interface([
   "event AccessRevoked(uint256 indexed assetId, address indexed owner, address indexed grantee)"
 ]);
@@ -32,6 +35,18 @@ function fakeProviderWithCode(chainId = 31337n, receipt: unknown = null, code = 
   return {
     getNetwork: vi.fn().mockResolvedValue({ chainId }),
     getCode: vi.fn().mockResolvedValue(code),
+    getTransactionReceipt: vi.fn().mockResolvedValue(receipt)
+  };
+}
+
+function fakeProviderWithTransaction(chainId = 31337n, receipt: unknown = null, data = "0x") {
+  return {
+    getNetwork: vi.fn().mockResolvedValue({ chainId }),
+    getTransaction: vi.fn().mockResolvedValue({
+      from: ownerWallet,
+      to: contractAddress,
+      data
+    }),
     getTransactionReceipt: vi.fn().mockResolvedValue(receipt)
   };
 }
@@ -404,6 +419,60 @@ describe("blockchain read service", () => {
       validFrom: 10,
       validUntil: 20
     });
+  });
+
+  it("selects the AccessGranted event that matches the expected grantee when multiple grant events are present", async () => {
+    const unrelatedReceipt = accessGrantedReceipt({ grantee: ownerWallet });
+    const matchingReceipt = accessGrantedReceipt();
+    const receipt = {
+      ...matchingReceipt,
+      logs: [...unrelatedReceipt.logs, ...matchingReceipt.logs]
+    };
+    const provider = fakeProvider(31337n, receipt);
+    const service = createBlockchainReadService({
+      provider,
+      contract: fakeContract(),
+      contractAddress,
+      chainId: 31337
+    });
+
+    await expect(
+      service.verifyAccessGrant({
+        transactionHash,
+        blockchainAssetId: "100",
+        expectedOwnerWallet: ownerWallet,
+        expectedGranteeWallet: readerWallet,
+        expectedAccessType: "READ",
+        expectedValidFrom: 0,
+        expectedValidUntil: 0
+      })
+    ).resolves.toMatchObject({
+      granteeWallet: readerWallet
+    });
+  });
+
+  it("rejects access grant transactions whose decoded input targets a different grantee", async () => {
+    const receipt = accessGrantedReceipt();
+    const data = grantAccessInterface.encodeFunctionData("grantAccess", [100n, ownerWallet, 1, 0, 0]);
+    const provider = fakeProviderWithTransaction(31337n, receipt, data);
+    const service = createBlockchainReadService({
+      provider,
+      contract: fakeContract(),
+      contractAddress,
+      chainId: 31337
+    });
+
+    await expect(
+      service.verifyAccessGrant({
+        transactionHash,
+        blockchainAssetId: "100",
+        expectedOwnerWallet: ownerWallet,
+        expectedGranteeWallet: readerWallet,
+        expectedAccessType: "READ",
+        expectedValidFrom: 0,
+        expectedValidUntil: 0
+      })
+    ).rejects.toBeInstanceOf(BlockchainVerificationError);
   });
 
   it("rejects failed or unrelated access grant receipts", async () => {

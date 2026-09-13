@@ -1,0 +1,2 @@
+window.KRYPTO_APP_MODE = "REAL_MODE";
+window.KRYPTO_ALLOW_DEMO_MODE = false;

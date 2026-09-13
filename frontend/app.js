@@ -9,6 +9,15 @@ const defaultPreferences = () => ({
   theme: "dark"
 });
 
+const defaultSecurityPolicy = () => ({
+  requireWalletForBlockchainActions: true,
+  requireKycBeforeSharing: false,
+  sources: {
+    requireWalletForBlockchainActions: "application",
+    requireKycBeforeSharing: "backend"
+  }
+});
+
 const emptyUser = () => ({
   name: "Guest",
   email: "",
@@ -32,6 +41,7 @@ const initialState = () => ({
     kycStatus: "PENDING"
   },
   settings: defaultPreferences(),
+  securityPolicy: defaultSecurityPolicy(),
   folders: [
     { id: "personal", name: "Personal", createdAt: Date.now() },
     { id: "certificates", name: "Certificates", createdAt: Date.now() },
@@ -113,17 +123,30 @@ let walletEventsRegistered = false;
 let toastTimer = null;
 
 function isDemoModeEnabled() {
-  return window.KRYPTO_DEMO_MODE === true || localStorage.getItem(DEMO_MODE_STORAGE_KEY) === "true";
+  return window.KRYPTO_ALLOW_DEMO_MODE === true && window.KRYPTO_APP_MODE === "DEMO_MODE";
+}
+
+function isRealModeEnabled() {
+  return !isDemoModeEnabled();
+}
+
+function requiresWalletForBlockchainActions() {
+  return isRealModeEnabled() || state.securityPolicy?.requireWalletForBlockchainActions !== false;
+}
+
+function requiresKycBeforeSharing() {
+  if (isRealModeEnabled()) {
+    return state.securityPolicy?.requireKycBeforeSharing === true;
+  }
+
+  return state.settings.requireKyc !== false;
 }
 
 function setDemoModeEnabled(enabled) {
-  if (enabled) {
-    localStorage.setItem(DEMO_MODE_STORAGE_KEY, "true");
-    return;
-  }
-
   localStorage.removeItem(DEMO_MODE_STORAGE_KEY);
-  localStorage.removeItem(DEMO_STATE_STORAGE_KEY);
+  if (!enabled) {
+    localStorage.removeItem(DEMO_STATE_STORAGE_KEY);
+  }
 }
 
 function loadPreferences() {
@@ -266,6 +289,25 @@ async function loadOwnedAssets() {
   }
 }
 
+async function loadSecurityPolicy() {
+  if (!window.KryptoVaultApi || isDemoModeEnabled()) return defaultSecurityPolicy();
+
+  try {
+    const policy = await window.KryptoVaultApi.get("/api/security-policy");
+    return {
+      ...defaultSecurityPolicy(),
+      requireWalletForBlockchainActions: policy?.requireWalletForBlockchainActions !== false,
+      requireKycBeforeSharing: policy?.requireKycBeforeSharing === true,
+      sources: {
+        ...defaultSecurityPolicy().sources,
+        ...(policy?.sources && typeof policy.sources === "object" ? policy.sources : {})
+      }
+    };
+  } catch (_) {
+    return defaultSecurityPolicy();
+  }
+}
+
 async function loadSharedAssets() {
   if (!window.KryptoVaultApi) return [];
 
@@ -347,12 +389,13 @@ async function loadBackendState() {
   if (isDemoModeEnabled()) return;
   const generation = accountStateGeneration;
 
-  const [user, folders, documents, shared, activities] = await Promise.all([
+  const [user, folders, documents, shared, activities, securityPolicy] = await Promise.all([
     loadAuthenticatedUser(),
     loadFolders(),
     loadOwnedAssets(),
     loadSharedAssets(),
-    loadAuditActivity()
+    loadAuditActivity(),
+    loadSecurityPolicy()
   ]);
 
   if (generation !== accountStateGeneration) return;
@@ -363,7 +406,8 @@ async function loadBackendState() {
     folders,
     documents,
     shared,
-    activities
+    activities,
+    securityPolicy
   };
   renderAll();
 }
@@ -540,9 +584,11 @@ function resetAccountScopedState(message = "Guest", walletAddress = "") {
   accountStateGeneration += 1;
   blockchainRecordsRequestId += 1;
   const settings = { ...state.settings };
+  const securityPolicy = { ...(state.securityPolicy || defaultSecurityPolicy()) };
   state = {
     ...emptyAppData(),
     settings,
+    securityPolicy,
     user: {
       ...emptyUser(),
       name: message,
@@ -955,6 +1001,7 @@ function applyTheme() {
 
 function renderAll() {
   applyTheme();
+  renderModeControls();
   renderHeader();
   renderDashboard();
   renderDocuments();
@@ -967,6 +1014,71 @@ function renderAll() {
   renderSettings();
   populateFolderSelect();
   if (currentDocId) renderDocumentModal();
+}
+
+function renderModeControls() {
+  const demoMode = isDemoModeEnabled();
+  const settingsTitle = document.getElementById("modeSettingsTitle");
+  const settingsDescription = document.getElementById("modeSettingsDescription");
+  const seedDemoBtn = document.getElementById("seedDemoBtn");
+  const resetAllBtn = document.getElementById("resetAllBtn");
+  const aesModeText = document.getElementById("uploadAesModeText");
+  const blockchainModeText = document.getElementById("uploadBlockchainModeText");
+  const modeNotesTitle = document.getElementById("modeNotesTitle");
+  const modeNotesDescription = document.getElementById("modeNotesDescription");
+  const modeNotesList = document.getElementById("modeNotesList");
+  const securityArchitectureNote = document.getElementById("securityArchitectureNote");
+
+  if (settingsTitle) settingsTitle.textContent = demoMode ? "Demo Settings" : "Real Mode Settings";
+  if (settingsDescription) {
+    settingsDescription.textContent = demoMode
+      ? "Use these local-only controls while presenting or testing."
+      : "Demo helpers are disabled in real mode.";
+  }
+  if (seedDemoBtn) {
+    seedDemoBtn.hidden = !demoMode;
+    seedDemoBtn.disabled = !demoMode;
+  }
+  if (resetAllBtn) {
+    resetAllBtn.hidden = !demoMode;
+    resetAllBtn.disabled = !demoMode;
+  }
+  if (aesModeText) {
+    aesModeText.textContent = demoMode ? "simulated architecture" : "real client-side encryption";
+  }
+  if (blockchainModeText) {
+    blockchainModeText.textContent = demoMode ? "mock transaction" : "MetaMask-signed transaction";
+  }
+  if (modeNotesTitle) modeNotesTitle.textContent = demoMode ? "Demo Notes" : "Real Mode Notes";
+  if (modeNotesDescription) {
+    modeNotesDescription.textContent = demoMode
+      ? "What is real vs simulated in this development demo."
+      : "Production-style controls active in this build.";
+  }
+  if (modeNotesList) {
+    modeNotesList.innerHTML = demoMode
+      ? `
+        <li><span>✓</span> Real browser SHA-256 hashing</li>
+        <li><span>✓</span> Real local file metadata handling</li>
+        <li><span>✓</span> Real MetaMask connection when installed</li>
+        <li><span>✓</span> Persistent mock data via localStorage</li>
+        <li><span>○</span> Blockchain writes are simulated</li>
+        <li><span>○</span> KYC is simulated</li>
+        <li><span>○</span> Production AES/key wrapping is not implemented</li>
+      `
+      : `
+        <li><span>✓</span> Real browser SHA-256 hashing</li>
+        <li><span>✓</span> Client-side AES encryption and key wrapping</li>
+        <li><span>✓</span> MetaMask wallet authentication and blockchain signatures</li>
+        <li><span>✓</span> Backend-enforced wallet authorization</li>
+        <li><span>✓</span> Backend policy controls for sharing requirements</li>
+      `;
+  }
+  if (securityArchitectureNote) {
+    securityArchitectureNote.textContent = demoMode
+      ? "SHA-256 hashing and MetaMask connection can be real in this demo. AES encryption, key wrapping and blockchain writes remain simulated architecture."
+      : "SHA-256 hashing, encryption, key wrapping and blockchain writes use the real integrated flow in REAL_MODE.";
+  }
 }
 
 function renderHeader() {
@@ -1193,8 +1305,8 @@ function calculateSecurityScore() {
   let score = 30; // Base score for SHA-256 integrity + protected workflow.
   if (isKycVerified()) score += 20;
   if (state.user.walletAddress) score += 20;
-  if (state.settings.requireKyc) score += 10;
-  if (state.settings.requireWallet) score += 10;
+  if (requiresKycBeforeSharing()) score += 10;
+  if (requiresWalletForBlockchainActions()) score += 10;
   if (!state.documents.length || state.documents.every(d => d.verified && !d.tampered)) score += 10;
   return Math.min(score, 100);
 }
@@ -1244,9 +1356,38 @@ function renderSecurity() {
 }
 
 function renderSettings() {
-  document.getElementById("requireKyc").checked = !!state.settings.requireKyc;
-  document.getElementById("requireWallet").checked = !!state.settings.requireWallet;
-  document.getElementById("showProgress").checked = !!state.settings.showProgress;
+  const requireKyc = document.getElementById("requireKyc");
+  const requireWallet = document.getElementById("requireWallet");
+  const showProgress = document.getElementById("showProgress");
+  const kycLabel = document.getElementById("requireKycPolicyText");
+  const walletLabel = document.getElementById("requireWalletPolicyText");
+
+  if (requireKyc) {
+    requireKyc.checked = requiresKycBeforeSharing();
+    requireKyc.disabled = isRealModeEnabled();
+  }
+
+  if (requireWallet) {
+    requireWallet.checked = requiresWalletForBlockchainActions();
+    requireWallet.disabled = isRealModeEnabled();
+  }
+
+  if (showProgress) {
+    showProgress.checked = !!state.settings.showProgress;
+    showProgress.disabled = false;
+  }
+
+  if (kycLabel) {
+    kycLabel.textContent = isRealModeEnabled()
+      ? "Server policy only; the frontend cannot lower this requirement."
+      : "Demo-only gate for local sharing presentation.";
+  }
+
+  if (walletLabel) {
+    walletLabel.textContent = isRealModeEnabled()
+      ? "Locked on for real blockchain transactions."
+      : "Demo-only gate; real blockchain actions still require wallet authentication.";
+  }
 }
 
 function populateFolderSelect() {
@@ -1465,7 +1606,9 @@ function renderDocumentModal() {
       ${isDemoModeEnabled() ? `<button class="btn ghost" onclick="simulateTamper('${d.id}')">Simulate Tampering</button>` : ""}
     </div>
     <div class="inline-note" style="margin-top:14px">
-      This demo does not upload plaintext file bytes to a server. It calculates a real SHA-256 hash in your browser and keeps mock records local to explicit demo mode.
+      ${isDemoModeEnabled()
+        ? "This demo does not upload plaintext file bytes to a server. It calculates a real SHA-256 hash in your browser and keeps mock records local to explicit demo mode."
+        : "Plaintext file bytes stay in the browser. The backend stores ciphertext and verifies blockchain-backed records."}
     </div>
   `;
 
@@ -1741,13 +1884,13 @@ function renderDocumentBlockchainTab(doc) {
 
 window.openShare = function(docId) {
   currentDocId = docId;
-  if (state.settings.requireKyc && !isKycVerified()) {
-    toast("Demo policy: complete KYC before sharing.");
+  if (requiresKycBeforeSharing() && !isKycVerified()) {
+    toast(isRealModeEnabled() ? "Server policy requires KYC before sharing." : "Demo policy: complete KYC before sharing.");
     switchPage("account");
     return;
   }
-  if (state.settings.requireWallet && !state.user.walletAddress) {
-    toast("Demo policy: connect wallet before blockchain actions.");
+  if (requiresWalletForBlockchainActions() && !state.user.walletAddress) {
+    toast(isRealModeEnabled() ? "Connect and authenticate your wallet before blockchain actions." : "Demo policy: connect wallet before blockchain actions.");
     return;
   }
   document.getElementById("shareName").value = "";
@@ -1758,6 +1901,12 @@ window.openShare = function(docId) {
 
 function isWalletAddress(value) {
   return /^0x[a-fA-F0-9]{40}$/.test(String(value || "").trim());
+}
+
+function normalizeShareRecipientAddress(value) {
+  const trimmed = String(value || "").trim();
+  if (!isWalletAddress(trimmed)) return "";
+  return window.ethers?.getAddress ? window.ethers.getAddress(trimmed).toLowerCase() : trimmed.toLowerCase();
 }
 
 function unixNowSeconds() {
@@ -1817,14 +1966,15 @@ async function grantAccess() {
   const d = state.documents.find(x => x.id === currentDocId);
   if (!d) return;
   const displayName = document.getElementById("shareName").value.trim();
-  const recipient = document.getElementById("shareRecipient").value.trim();
-  if (!recipient) return toast("Enter recipient wallet address.");
+  const intendedRecipient = document.getElementById("shareRecipient").value.trim();
+  if (!intendedRecipient) return toast("Enter recipient wallet address.");
 
   const duration = Number(document.getElementById("shareDuration").value);
   const accessType = document.getElementById("shareRole").value;
   const reason = document.getElementById("shareReason").value.trim();
 
   if (isDemoModeEnabled()) {
+    const recipient = intendedRecipient;
     const p = {
       id: crypto.randomUUID(),
       name: displayName || shortHash(recipient),
@@ -1845,7 +1995,8 @@ async function grantAccess() {
     return;
   }
 
-  if (!isWalletAddress(recipient)) return toast("Enter a valid recipient wallet address.");
+  const recipient = normalizeShareRecipientAddress(intendedRecipient);
+  if (!recipient) return toast("Enter a valid recipient wallet address.");
   if (accessType !== "READ" && accessType !== "WRITE") return toast("Choose READ or WRITE access.");
   if (!d.blockchainAssetId || d.blockchainVerificationStatus !== "verified") {
     return toast("This document must be registered and verified on-chain before sharing.");
@@ -1860,6 +2011,11 @@ async function grantAccess() {
   grantButton.textContent = "Granting...";
 
   try {
+    console.info("[share] recipient selected", {
+      intendedRecipient,
+      normalizedRecipient: recipient
+    });
+
     const recipientKey = await window.KryptoVaultCrypto.getPublicEncryptionKey(recipient);
     if (!recipientKey?.publicEncryptionKey) {
       throw new Error("Recipient public encryption key was not found.");
@@ -1872,6 +2028,13 @@ async function grantAccess() {
       keyId: `recipient:${recipientKey.walletAddress || recipient.toLowerCase()}`
     };
     const accessWindow = accessWindowFromDurationDays(duration);
+    console.info("[share] grantAccess arguments", {
+      assetId: String(d.blockchainAssetId),
+      recipient,
+      accessType,
+      validFrom: accessWindow.validFrom,
+      validUntil: accessWindow.validUntil
+    });
     const grantTx = await window.KryptoVaultBlockchain.grantAccess(
       d.blockchainAssetId,
       recipient,
@@ -2352,11 +2515,21 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("saveProfileBtn").addEventListener("click", saveUserProfile);
 
-  ["requireKyc","requireWallet","showProgress"].forEach(id => {
+  ["requireKyc","requireWallet"].forEach(id => {
     document.getElementById(id).addEventListener("change", e => {
+      if (isRealModeEnabled()) {
+        e.target.checked = id === "requireKyc" ? requiresKycBeforeSharing() : requiresWalletForBlockchainActions();
+        toast("Real security policy is enforced by the application and backend.");
+        return;
+      }
       state.settings[id] = e.target.checked;
       saveState();
     });
+  });
+
+  document.getElementById("showProgress").addEventListener("change", e => {
+    state.settings.showProgress = e.target.checked;
+    saveState();
   });
 
   document.getElementById("clearActivityBtn").addEventListener("click", () => {
@@ -2369,17 +2542,24 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   document.getElementById("seedDemoBtn").addEventListener("click", () => {
-    setDemoModeEnabled(true);
-    state = { ...initialState(), settings: { ...defaultPreferences(), ...loadPreferences() } };
+    if (!isDemoModeEnabled()) {
+      toast("Restore Demo Data is available only when DEMO_MODE is explicitly enabled in development.");
+      return;
+    }
+    state = { ...initialState(), settings: { ...defaultPreferences(), ...loadPreferences() }, securityPolicy: defaultSecurityPolicy() };
     saveState();
     toast("Demo data restored.");
   });
 
   document.getElementById("resetAllBtn").addEventListener("click", () => {
+    if (!isDemoModeEnabled()) {
+      toast("Reset Entire Workspace is disabled in REAL_MODE.");
+      return;
+    }
     setDemoModeEnabled(false);
-    state = { ...emptyAppData(), settings: { ...defaultPreferences(), ...loadPreferences() } };
+    state = { ...emptyAppData(), settings: { ...defaultPreferences(), ...loadPreferences() }, securityPolicy: defaultSecurityPolicy() };
     saveState();
-    toast("Workspace reset.");
+    toast("Demo workspace reset.");
   });
 
   document.querySelectorAll(".modal").forEach(modal => {

@@ -124,11 +124,11 @@
           <div class="panel">
             <div class="panel-head">
               <div>
-                <h3>Demo Notes</h3>
-                <p>What is real vs simulated in this build.</p>
+                <h3 id="modeNotesTitle">Real Mode Notes</h3>
+                <p id="modeNotesDescription">Production-style controls active in this build.</p>
               </div>
             </div>
-            <ul class="checklist">
+            <ul class="checklist" id="modeNotesList">
               <li><span>✓</span> Real browser SHA-256 hashing</li>
               <li><span>✓</span> Real local file metadata handling</li>
               <li><span>✓</span> Real MetaMask connection when installed</li>
@@ -273,8 +273,8 @@
 
             <div class="panel">
               <h3>Security Policy</h3>
-              <label class="toggle-row"><span>Require KYC before sharing<small>Blocks sharing until demo identity verification is complete.</small></span><input type="checkbox" id="requireKyc" checked /></label>
-              <label class="toggle-row"><span>Require wallet before blockchain actions<small>Requires a connected wallet before access transactions.</small></span><input type="checkbox" id="requireWallet" checked /></label>
+              <label class="toggle-row"><span>Require KYC before sharing<small id="requireKycPolicyText">Server policy only; the frontend cannot lower this requirement.</small></span><input type="checkbox" id="requireKyc" checked /></label>
+              <label class="toggle-row"><span>Require wallet before blockchain actions<small id="requireWalletPolicyText">Locked on for real blockchain transactions.</small></span><input type="checkbox" id="requireWallet" checked disabled /></label>
               <label class="toggle-row"><span>Show security progress during upload<small>Shows each protection stage during the demo upload flow.</small></span><input type="checkbox" id="showProgress" checked /></label>
             </div>
           </div>
@@ -291,7 +291,7 @@
               <span class="security-arrow">→</span>
               <div><b>Encrypted File</b><span>Off-chain protected storage</span></div>
             </div>
-            <div class="inline-note">SHA-256 hashing and MetaMask connection can be real in this demo. AES encryption, key wrapping and blockchain writes remain simulated architecture.</div>
+            <div class="inline-note" id="securityArchitectureNote">SHA-256 hashing, encryption, key wrapping and blockchain writes use the real integrated flow in REAL_MODE.</div>
           </div>
         </div>
       </section>
@@ -299,8 +299,8 @@
       <!-- Settings -->
       <section class="page" id="page-settings">
         <div class="panel">
-          <h3>Demo Settings</h3>
-          <p>Use these controls while presenting or testing.</p>
+          <h3 id="modeSettingsTitle">Real Mode Settings</h3>
+          <p id="modeSettingsDescription">Demo helpers are disabled in real mode.</p>
           <div class="settings-actions">
             <button class="btn secondary" id="seedDemoBtn">Restore Demo Data</button>
             <button class="btn danger" id="resetAllBtn">Reset Entire Workspace</button>
@@ -342,8 +342,8 @@
         </div>
 
         <div class="security-options">
-          <label class="toggle-row"><span>AES-256 Encryption <small>simulated architecture</small></span><input type="checkbox" checked disabled /></label>
-          <label class="toggle-row"><span>Blockchain Verification <small>mock transaction</small></span><input type="checkbox" checked disabled /></label>
+          <label class="toggle-row"><span>AES-256 Encryption <small id="uploadAesModeText">real client-side encryption</small></span><input type="checkbox" checked disabled /></label>
+          <label class="toggle-row"><span>Blockchain Verification <small id="uploadBlockchainModeText">MetaMask-signed transaction</small></span><input type="checkbox" checked disabled /></label>
           <label class="toggle-row"><span>SHA-256 Fingerprint <small>real browser hash</small></span><input type="checkbox" checked disabled /></label>
         </div>
 
@@ -523,6 +523,7 @@
     </div>
   </div>
 
+  <script src="runtime-config.js"></script>
   <script src="node_modules/ethers/dist/ethers.umd.min.js"></script>
   <script src="api.js"></script>
   <script src="crypto.js"></script>

@@ -3,6 +3,7 @@ import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildSessionCookie, clearSessionsForTests, createSession } from "../auth/session.js";
 import { createApp } from "../app.js";
+import { env } from "../config/env.js";
 import { AccessGrantModel } from "../models/access-grant.js";
 import { AssetAuditEventModel } from "../models/asset-audit-event.js";
 import { AssetModel } from "../models/asset.js";
@@ -27,6 +28,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  env.REQUIRE_KYC_BEFORE_SHARING = false;
   clearSessionsForTests();
   vi.restoreAllMocks();
 });
@@ -1067,6 +1069,25 @@ describe("asset access grant sync route", () => {
       .expect(409);
 
     expect(response.body.error.code).toBe("ASSET_NOT_REGISTERED_ON_CHAIN");
+    expect(blockchainSpy).not.toHaveBeenCalled();
+  });
+
+  it("enforces backend KYC policy before syncing a grant when enabled", async () => {
+    env.REQUIRE_KYC_BEFORE_SHARING = true;
+    const assetId = new mongoose.Types.ObjectId();
+    vi.spyOn(AssetModel, "findOne").mockReturnValue(queryResult(registeredAsset(assetId)) as never);
+    vi.spyOn(UserModel, "findOne").mockReturnValue(queryResult({ walletAddress: ownerWallet, kycStatus: "PENDING" }) as never);
+    const replayCheckSpy = vi.spyOn(AccessGrantModel, "findOne");
+    const blockchainSpy = vi.spyOn(blockchainRead, "createBlockchainReadService");
+
+    const response = await request(createApp())
+      .post(`/api/assets/${assetId.toString()}/access/grant-sync`)
+      .set("Cookie", authenticatedCookie())
+      .send(validGrantBody())
+      .expect(403);
+
+    expect(response.body.error.code).toBe("KYC_REQUIRED");
+    expect(replayCheckSpy).not.toHaveBeenCalled();
     expect(blockchainSpy).not.toHaveBeenCalled();
   });
 

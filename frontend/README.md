@@ -20,13 +20,27 @@ vanilla HTML, CSS, and JavaScript:
 
 HOW TO RUN THE FRONTEND DEMO
 ----------------------------
-Start the local frontend server from this folder:
+REAL_MODE is the default. Start the local frontend server from this folder:
 
 npm run dev
 
 Then open:
 
 http://localhost:8000
+
+To intentionally launch DEMO_MODE for a local development presentation, start
+the frontend server with explicit development configuration:
+
+PowerShell:
+
+$env:KRYPTO_FRONTEND_MODE="DEMO_MODE"; npm run dev
+
+cmd.exe:
+
+set KRYPTO_FRONTEND_MODE=DEMO_MODE && npm run dev
+
+DEMO_MODE is ignored when `NODE_ENV=production`. Query parameters must not
+enable demo behavior.
 
 When the frontend is served locally, the API client uses:
 
@@ -99,6 +113,11 @@ SECURITY MODEL
 
 WHAT IS ACTUALLY WORKING IN THE FRONTEND DEMO
 ---------------------------------------------
+In REAL_MODE, fake wallet fallback, seeded fake documents, fake blockchain
+hashes/block numbers, Clear Demo Logs, Restore Demo Data, Reset Entire
+Workspace, Simulate Tampering, and simulated strong revoke are unavailable.
+They are allowed only in explicitly configured DEMO_MODE.
+
 - Sidebar navigation
 - Dashboard statistics
 - Upload modal
@@ -111,15 +130,15 @@ WHAT IS ACTUALLY WORKING IN THE FRONTEND DEMO
 - Move documents between folders
 - Mock KYC flow
 - Real MetaMask account connection if installed
-- Clearly demo-only wallet fallback if MetaMask is unavailable
+- Clearly demo-only wallet fallback if MetaMask is unavailable and DEMO_MODE is enabled
 - Grant access UI
 - Revoke access UI
-- Standard and strong revocation demo states
+- Standard and strong revocation demo states in DEMO_MODE; real revoke/rotation uses backend and MetaMask flows
 - Activity/audit log screen
-- Mock blockchain transaction hashes
-- Mock block numbers
-- Integrity verification demo
-- Tampering simulation
+- Mock blockchain transaction hashes in DEMO_MODE only
+- Mock block numbers in DEMO_MODE only
+- Integrity verification demo in DEMO_MODE; real integrity verification uses backend and local decrypted hashes
+- Tampering simulation in DEMO_MODE only
 - Shared With Me screen
 - Settings and reset controls
 - Live Security status panel and Security Health score
@@ -138,7 +157,7 @@ security behavior:
 - local activity log clearing
 - restore demo data
 - reset workspace
-- frontend-only policy toggles until enforced by backend routes
+- frontend-only policy toggles in DEMO_MODE only; real policy is application/backend enforced
 - folder organization and folder movement
 
 Folders are organizational only. Folder access control is not blockchain-based.
@@ -233,6 +252,19 @@ Real-mode flow:
 The selected wallet address alone is not authentication. The fake wallet
 fallback exists only when explicit demo mode is enabled. In real mode,
 MetaMask and the backend challenge/signature flow are required.
+
+SECURITY POLICY CONTROLS
+------------------------
+In real mode, the "Require wallet before blockchain actions" control is locked
+on. The backend requires an authenticated wallet session for asset and
+blockchain sync routes, and the frontend cannot disable that authorization.
+
+"Require KYC before sharing" reflects server policy from
+GET /api/security-policy. If the backend enables REQUIRE_KYC_BEFORE_SHARING,
+the frontend displays it and the backend enforces it during access grant sync.
+
+"Show security progress during upload" is only a frontend display preference
+and remains locally toggleable.
 
 HOW OPEN SHOULD WORK AFTER INTEGRATION
 --------------------------------------
