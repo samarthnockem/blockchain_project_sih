@@ -1,8 +1,30 @@
 {
-  "name": "kryptovault-local",
+  "name": "kryptovault",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "dev:all": "powershell -ExecutionPolicy Bypass -File .\\start-kryptovault.ps1"
+    "dev:all": "powershell -ExecutionPolicy Bypass -File .\\start-kryptovault.ps1",
+    "build": "npm --prefix backend run build",
+    "test": "npm --prefix backend test && npm --prefix frontend test"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "ethers": "^6.17.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.0.0",
+    "mongoose": "^9.9.5",
+    "multer": "^2.3.0",
+    "pino": "^9.6.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.2.0",
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3"
   }
 }
