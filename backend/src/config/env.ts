@@ -45,7 +45,7 @@ const envSchema = z.object({
   GRIDFS_BUCKET_NAME: z.string().trim().min(1).default("encryptedAssets"),
   REQUIRE_KYC_BEFORE_SHARING: envBoolean.default(false),
   ETHEREUM_RPC_URL: z.string().url(),
-  CONTRACT_ADDRESS: z.string().regex(/^0x[a-fA-F0-9]{40}$/).default("0x0000000000000000000000000000000000000000"),
+  CONTRACT_ADDRESS: z.string().regex(/^0x[a-fA-F0-9]{40}$/).default("0x87becA5241e43607ce2983608B1D479f97cD9a05"),
   EXPECTED_CHAIN_ID: z.coerce.number().int().positive(),
 });
 
