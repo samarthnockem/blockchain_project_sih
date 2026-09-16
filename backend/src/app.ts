@@ -1,6 +1,13 @@
 import cors from "cors";
 import express from "express";
-import helmet from "helmet";
+import helmetModule from "helmet";
+import type { RequestHandler } from "express";
+
+type HelmetFactory = () => RequestHandler;
+
+const helmet =
+  ((helmetModule as unknown as { default?: HelmetFactory }).default ??
+    helmetModule) as HelmetFactory;
 import { env } from "./config/env.js";
 import { attachSession } from "./auth/session.js";
 import { errorHandler } from "./middleware/error-handler.js";
